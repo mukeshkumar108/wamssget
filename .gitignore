@@ -1,0 +1,20 @@
+# Node
+node_modules
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Env
+.env
+
+# WhatsApp session/cache
+.wwebjs_auth
+.wwebjs_cache
+
+# Build/compiled outputs
+dist
+out/*.db
+out/*.jsonl
+
+# Drizzle migrations can be tracked, but skip temp dbs
+*.sqlite
