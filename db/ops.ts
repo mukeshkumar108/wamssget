@@ -25,15 +25,30 @@ export async function upsertChat(row: {
   }
 }
 
-export async function upsertContact(row: { id: string; name?: string | null }) {
+export async function upsertContact(row: { id: string; savedName?: string | null; pushname?: string | null; displayName?: string | null }) {
   if (!row.id) return;
   const existing = await db.select().from(contacts).where(eq(contacts.id, row.id));
   if (existing.length) {
-    if (row.name && row.name !== existing[0].name) {
-      await db.update(contacts).set({ name: row.name }).where(eq(contacts.id, row.id));
+    const updates: any = {};
+    if (row.savedName !== undefined && row.savedName !== existing[0].savedName) {
+      updates.savedName = row.savedName;
+    }
+    if (row.pushname !== undefined && row.pushname !== existing[0].pushname) {
+      updates.pushname = row.pushname;
+    }
+    if (row.displayName !== undefined && row.displayName !== existing[0].displayName) {
+      updates.displayName = row.displayName;
+    }
+    if (Object.keys(updates).length > 0) {
+      await db.update(contacts).set(updates).where(eq(contacts.id, row.id));
     }
   } else {
-    await db.insert(contacts).values({ id: row.id, name: row.name ?? null });
+    await db.insert(contacts).values({
+      id: row.id,
+      savedName: row.savedName ?? null,
+      pushname: row.pushname ?? null,
+      displayName: row.displayName ?? null,
+    });
   }
 }
 
@@ -41,7 +56,11 @@ export async function insertMessage(row: {
   id: string;
   chatId: string;
   senderId?: string | null;
-  senderName?: string | null;
+  savedName?: string | null;
+  pushname?: string | null;
+  displayName?: string | null;
+  participantId?: string | null;
+  participantName?: string | null;
   fromMe: boolean;
   type: string;
   body?: string | null;
@@ -57,7 +76,11 @@ export async function insertMessage(row: {
       id: row.id,
       chatId: row.chatId,
       senderId: row.senderId ?? null,
-      senderName: row.senderName ?? null,
+      savedName: row.savedName ?? null,
+      pushname: row.pushname ?? null,
+      displayName: row.displayName ?? null,
+      participantId: row.participantId ?? null,
+      participantName: row.participantName ?? null,
       fromMe: row.fromMe,
       type: row.type,
       body: row.body ?? null,
