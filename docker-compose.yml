@@ -1,0 +1,52 @@
+version: '3.8'
+
+services:
+  whatsapp-get:
+    build: .
+    container_name: whatsapp-get
+    restart: unless-stopped
+
+    # Persistent volumes for auth and data
+    volumes:
+      - auth_data:/app/.wwebjs_auth
+      - app_data:/app/out
+
+    # Environment variables
+    environment:
+      - NODE_ENV=production
+      - HTTP_PORT=3000
+      - BOOTSTRAP_CHAT_LIMIT=15
+      - BOOTSTRAP_MSG_LIMIT=20
+      - HEARTBEAT_MS=30000
+      - BACKFILL_ALL=true
+
+    # Port mapping
+    ports:
+      - "3000:3000"
+
+    # Health check
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
+
+    # Security settings
+    security_opt:
+      - no-new-privileges:true
+
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 256M
+
+# Named volumes for data persistence
+volumes:
+  auth_data:
+    driver: local
+  app_data:
+    driver: local

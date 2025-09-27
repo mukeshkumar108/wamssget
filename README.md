@@ -101,6 +101,23 @@ npx ts-node index.ts
 3. Check `out/status.json` for service health
 4. Monitor `out/service.log` for detailed logs
 
+### **HTTP API**
+Once running, the service exposes:
+- **`/qr`** - Current QR code as base64 (for React frontend integration)
+- **`/status`** - Comprehensive service health and metrics
+- **`/health`** - Simple health check for containers
+
+```bash
+# Get QR code for frontend
+curl http://localhost:3000/qr
+
+# Check service status
+curl http://localhost:3000/status
+
+# Health check
+curl http://localhost:3000/health
+```
+
 ---
 
 ## 📈 Production Deployment

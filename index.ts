@@ -8,6 +8,8 @@ import WAWebJS, { Message, Chat } from 'whatsapp-web.js';
 import { db, initDb } from './db/db';
 import * as schema from './db/schema';
 import { eq } from "drizzle-orm";
+import express, { Request, Response } from 'express';
+import QRCode from 'qrcode';
 
 const { Client, LocalAuth } = WAWebJS as any;
 
@@ -37,6 +39,17 @@ const BACKFILL_BATCH = +(process.env.BACKFILL_BATCH || 100);
 =========================== */
 if (!fs.existsSync(OUTPUT_DIR)) fs.mkdirSync(OUTPUT_DIR, { recursive: true });
 initDb();
+
+// Run database migrations at startup
+try {
+  log('🔄 Running database migrations...');
+  const { execSync } = require('child_process');
+  execSync('npx drizzle-kit migrate', { stdio: 'inherit' });
+  log('✅ Database migrations completed');
+} catch (err: any) {
+  log('⚠️ Database migration failed:', err?.message);
+  // Don't fail startup if migrations fail - service can still run
+}
 
 /* ===========================
    Status helpers
@@ -149,6 +162,95 @@ interface CallState {
 
 const activeCalls = new Map<string, CallState>();
 const CALL_CACHE_TTL = 60 * 60 * 1000; // 1 hour (calls don't last longer than this)
+
+/* ===========================
+   QR and HTTP server
+=========================== */
+let currentQR: string | null = null;
+let currentQRBase64: string | null = null;
+let httpServer: any = null;
+
+async function generateQRBase64(qrString: string): Promise<string> {
+  try {
+    return await QRCode.toDataURL(qrString, {
+      width: 256,
+      margin: 2,
+      color: {
+        dark: '#000000',
+        light: '#FFFFFF'
+      }
+    });
+  } catch (err) {
+    log('❌ Failed to generate QR base64:', err);
+    return '';
+  }
+}
+
+function startHTTPServer() {
+  const app = express();
+  const PORT = process.env.HTTP_PORT || 3000;
+
+  // QR endpoint - serves current QR as base64
+  app.get('/qr', (req, res) => {
+    if (!currentQRBase64) {
+      return res.status(404).json({
+        error: 'No QR code available',
+        message: 'QR code will be available when service needs authentication'
+      });
+    }
+
+    res.json({
+      qr: currentQRBase64,
+      timestamp: status.lastQrAt,
+      expiresAt: status.lastQrAt + (5 * 60 * 1000), // QR expires in 5 minutes
+      state: status.state
+    });
+  });
+
+  // Status endpoint - comprehensive service health
+  app.get('/status', (req, res) => {
+    const uptime = Date.now() - (status.lastReadyAt || Date.now());
+    const dbSize = fs.existsSync(path.join(OUTPUT_DIR, 'messages.db'))
+      ? fs.statSync(path.join(OUTPUT_DIR, 'messages.db')).size
+      : 0;
+
+    res.json({
+      state: status.state,
+      uptime,
+      lastQrAt: status.lastQrAt,
+      lastReadyAt: status.lastReadyAt,
+      lastMessageAt: status.lastMessageAt,
+      lastDbWriteAt: status.lastDbWriteAt,
+      retryCount: status.retryCount,
+      restartCount: status.restartCount,
+      details: status.details,
+      databaseSize: dbSize,
+      callsCaptured: activeCalls.size,
+      version: '1.0.0',
+      timestamp: Date.now()
+    });
+  });
+
+  // Health check endpoint for containers
+  app.get('/health', (req, res) => {
+    const isHealthy = status.state === 'connected' &&
+                     (Date.now() - status.lastMessageAt) < (10 * 60 * 1000); // 10 minutes
+
+    res.status(isHealthy ? 200 : 503).json({
+      healthy: isHealthy,
+      state: status.state,
+      lastMessageAt: status.lastMessageAt,
+      timestamp: Date.now()
+    });
+  });
+
+  httpServer = app.listen(PORT, () => {
+    log(`🌐 HTTP server listening on port ${PORT}`);
+    log(`📋 Endpoints: /qr, /status, /health`);
+  });
+
+  return app;
+}
 
 async function resolveContactName(
   id: string
@@ -544,16 +646,25 @@ function scheduleBackfill() {
    Event handlers
 =========================== */
 function setupEventHandlers(c: any) {
-  c.on('qr', (qr: string) => {
+  c.on('qr', async (qr: string) => {
+    currentQR = qr;
+    currentQRBase64 = await generateQRBase64(qr);
+
     writeStatus({
       state: 'waiting_qr',
       lastQrAt: Date.now(),
       details: 'Scan the QR in WhatsApp → Linked Devices',
     });
+
     console.log(
       '\n🔐 Scan this QR in WhatsApp: Settings → Linked Devices → Link a Device\n'
     );
     qrcode.generate(qr, { small: true });
+
+    // Start HTTP server when QR is available
+    if (!httpServer) {
+      startHTTPServer();
+    }
   });
 
   c.on('ready', async () => {
@@ -694,6 +805,10 @@ async function start() {
   writeStatus({ state: 'starting', details: 'Initializing client…' });
   setupEventHandlers(client);
   setupCallHandlers(client); // Add call event handlers
+
+  // Start HTTP server for QR and status endpoints
+  startHTTPServer();
+
   try {
     await client.initialize();
   } catch (err: any) {
