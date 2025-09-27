@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "b4afafa2-dbb8-40bf-8d62-ae0c33899e40",
+  "id": "a43d7edc-24a4-401f-84d5-25b8f4f7fe6a",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "tables": {
     "chats": {
@@ -61,6 +61,13 @@
           "notNull": false,
           "autoincrement": false
         },
+        "pushname": {
+          "name": "pushname",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "display_name": {
           "name": "display_name",
           "type": "text",
@@ -106,6 +113,13 @@
           "notNull": false,
           "autoincrement": false
         },
+        "pushname": {
+          "name": "pushname",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "display_name": {
           "name": "display_name",
           "type": "text",
@@ -120,15 +134,8 @@
           "notNull": false,
           "autoincrement": false
         },
-        "participant_saved_name": {
-          "name": "participant_saved_name",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "participant_display_name": {
-          "name": "participant_display_name",
+        "participant_name": {
+          "name": "participant_name",
           "type": "text",
           "primaryKey": false,
           "notNull": false,

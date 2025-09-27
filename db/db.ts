@@ -16,8 +16,19 @@ const DB_PATH = path.join(OUT_DIR, "messages.db");
 const sqlite = new Database(DB_PATH);
 export const db = drizzle(sqlite, { schema });
 
-// run migrations
+// ✅ get the instance type of the Database constructor
+type BetterSqlite3Instance = InstanceType<typeof Database>;
+
+function ensureIndexes(sql: BetterSqlite3Instance) {
+  sql.prepare(`CREATE INDEX IF NOT EXISTS idx_messages_chat_ts   ON messages (chat_id, ts)`).run();
+  sql.prepare(`CREATE INDEX IF NOT EXISTS idx_messages_sender_ts ON messages (sender_id, ts)`).run();
+}
+
+// run migrations, then ensure indexes
 export function initDb() {
   migrate(db, { migrationsFolder: "drizzle/migrations" });
-  console.log("✅ Database migrated");
+  ensureIndexes(sqlite);
+  console.log("✅ Database migrated & indexes ensured");
 }
+
+export { sqlite };
