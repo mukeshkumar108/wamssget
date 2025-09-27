@@ -327,8 +327,6 @@ function startHTTPServer() {
             type: schema.messages.type,
             body: schema.messages.body,
             timestamp: schema.messages.ts,
-            chatName: chat.name,
-            isGroup: chat.isGroup,
           })
           .from(schema.messages)
           .where(eq(schema.messages.chatId, chat.id))
