@@ -103,6 +103,8 @@ npx ts-node index.ts
 
 ### **HTTP API**
 Once running, the service exposes:
+
+#### **Public Endpoints**
 - **`/qr`** - Current QR code as base64 (for React frontend integration)
 - **`/status`** - Comprehensive service health and metrics
 - **`/health`** - Simple health check for containers
@@ -118,9 +120,56 @@ curl http://localhost:3000/status
 curl http://localhost:3000/health
 ```
 
+#### **REST API Endpoints (Protected)**
+All API endpoints require authentication with Bearer token:
+```bash
+curl -H "Authorization: Bearer YOUR_API_KEY" \
+     "http://localhost:3000/api/..."
+```
+
+**Messages Endpoints:**
+```bash
+# Recent chats with latest messages
+curl -H "Authorization: Bearer YOUR_API_KEY" \
+     "http://localhost:3000/api/messages/recent-chats?chats=5&messages=10"
+
+# Messages for specific chat
+curl -H "Authorization: Bearer YOUR_API_KEY" \
+     "http://localhost:3000/api/messages/chat/1234567890@c.us?limit=50&offset=0"
+
+# Messages from specific contact
+curl -H "Authorization: Bearer YOUR_API_KEY" \
+     "http://localhost:3000/api/messages/contact/1234567890@c.us?limit=50&offset=0"
+
+# Recent messages globally
+curl -H "Authorization: Bearer YOUR_API_KEY" \
+     "http://localhost:3000/api/messages/recent?limit=100"
+
+# Messages since timestamp
+curl -H "Authorization: Bearer YOUR_API_KEY" \
+     "http://localhost:3000/api/messages/since?ts=1698000000000"
+```
+
+**Calls Endpoints:**
+```bash
+# Recent calls
+curl -H "Authorization: Bearer YOUR_API_KEY" \
+     "http://localhost:3000/api/calls/recent?limit=50"
+
+# Calls since timestamp
+curl -H "Authorization: Bearer YOUR_API_KEY" \
+     "http://localhost:3000/api/calls/since?ts=1698000000000"
+```
+
+**API Configuration:**
+```bash
+# Set your API key in .env
+API_KEY=your-secure-api-key-here-change-this-in-production
+```
+
 ---
 
-## 📈 Production Deployment
+## � Production Deployment
 
 ### **PM2 (Recommended)**
 ```bash
@@ -169,7 +218,7 @@ WantedBy=multi-user.target
 
 ---
 
-## 🔍 Monitoring & Health Checks
+## �🔍 Monitoring & Health Checks
 
 ### **Status File** (`out/status.json`)
 ```json

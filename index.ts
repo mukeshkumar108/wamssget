@@ -7,7 +7,7 @@ import qrcode from 'qrcode-terminal';
 import WAWebJS, { Message, Chat } from 'whatsapp-web.js';
 import { db, initDb } from './db/db';
 import * as schema from './db/schema';
-import { eq } from "drizzle-orm";
+import { eq, desc, gte, and, sql } from "drizzle-orm";
 import express, { Request, Response } from 'express';
 import QRCode from 'qrcode';
 
@@ -49,6 +49,33 @@ try {
 } catch (err: any) {
   log('⚠️ Database migration failed:', err?.message);
   // Don't fail startup if migrations fail - service can still run
+}
+
+// Create database indexes for API performance
+async function createIndexes() {
+  try {
+    log('🔍 Creating database indexes for API performance...');
+
+    // Message indexes
+    await (db as any).run(sql.raw(schema.messageIndexes.chatIdTs));
+    await (db as any).run(sql.raw(schema.messageIndexes.senderIdTs));
+    await (db as any).run(sql.raw(schema.messageIndexes.ts));
+    await (db as any).run(sql.raw(schema.messageIndexes.type));
+
+    // Call indexes
+    await (db as any).run(sql.raw(schema.callIndexes.timestamp));
+    await (db as any).run(sql.raw(schema.callIndexes.chatId));
+    await (db as any).run(sql.raw(schema.callIndexes.callerId));
+
+    // Chat indexes
+    await (db as any).run(sql.raw(schema.chatIndexes.isGroup));
+    await (db as any).run(sql.raw(schema.chatIndexes.archived));
+
+    log('✅ Database indexes created successfully');
+  } catch (err: any) {
+    log('⚠️ Database index creation failed:', err?.message);
+    // Don't fail startup if index creation fails
+  }
 }
 
 /* ===========================
@@ -190,6 +217,30 @@ function startHTTPServer() {
   const app = express();
   const PORT = process.env.HTTP_PORT || 3000;
 
+  // Middleware
+  app.use(express.json());
+
+  // API Key authentication middleware
+  const authenticate = (req: Request, res: Response, next: any) => {
+    const authHeader = req.headers.authorization;
+    const apiKey = process.env.API_KEY;
+
+    if (!apiKey) {
+      return res.status(500).json({ error: 'API key not configured' });
+    }
+
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ error: 'Missing or invalid authorization header' });
+    }
+
+    const token = authHeader.substring(7);
+    if (token !== apiKey) {
+      return res.status(401).json({ error: 'Invalid API key' });
+    }
+
+    next();
+  };
+
   // QR endpoint - serves current QR as base64
   app.get('/qr', (req, res) => {
     if (!currentQRBase64) {
@@ -244,9 +295,306 @@ function startHTTPServer() {
     });
   });
 
+  // API Routes - Messages
+  app.get('/api/messages/recent-chats', authenticate, async (req, res) => {
+    try {
+      const chatsCount = Math.min(parseInt(req.query.chats as string) || 5, 50);
+      const messagesPerChat = Math.min(parseInt(req.query.messages as string) || 10, 100);
+
+      // Get recent chats with their latest messages (exclude WhatsApp system chat)
+      const chats = await db
+        .select({
+          id: schema.chats.id,
+          name: schema.chats.name,
+          isGroup: schema.chats.isGroup,
+          archived: schema.chats.archived,
+        })
+        .from(schema.chats)
+        .where(sql`name != 'WhatsApp'`)
+        .orderBy(desc(schema.chats.id))
+        .limit(chatsCount);
+
+      const result = [];
+
+      for (const chat of chats) {
+        const messages = await db
+          .select({
+            id: schema.messages.id,
+            chatId: schema.messages.chatId,
+            senderId: schema.messages.senderId,
+            displayName: schema.messages.displayName,
+            fromMe: schema.messages.fromMe,
+            type: schema.messages.type,
+            body: schema.messages.body,
+            timestamp: schema.messages.ts,
+            chatName: chat.name,
+            isGroup: chat.isGroup,
+          })
+          .from(schema.messages)
+          .where(eq(schema.messages.chatId, chat.id))
+          .orderBy(desc(schema.messages.ts))
+          .limit(messagesPerChat);
+
+        if (messages.length > 0) {
+          result.push({
+            chatId: chat.id,
+            chatName: chat.name,
+            isGroup: chat.isGroup,
+            messages: messages.reverse() // Oldest first
+          });
+        }
+      }
+
+      res.json({ chats: result });
+    } catch (err: any) {
+      log('❌ API Error /api/messages/recent-chats:', err?.message);
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  });
+
+  app.get('/api/messages/chat/:chatId', authenticate, async (req, res) => {
+    try {
+      const { chatId } = req.params;
+      const limit = Math.min(parseInt(req.query.limit as string) || 50, 500);
+      const offset = parseInt(req.query.offset as string) || 0;
+
+      const messages = await db
+        .select({
+          id: schema.messages.id,
+          chatId: schema.messages.chatId,
+          senderId: schema.messages.senderId,
+          displayName: schema.messages.displayName,
+          fromMe: schema.messages.fromMe,
+          type: schema.messages.type,
+          body: schema.messages.body,
+          timestamp: schema.messages.ts,
+          mimetype: schema.messages.mimetype,
+          filename: schema.messages.filename,
+          filesize: schema.messages.filesize,
+          durationMs: schema.messages.durationMs,
+        })
+        .from(schema.messages)
+        .where(eq(schema.messages.chatId, chatId))
+        .orderBy(desc(schema.messages.ts))
+        .limit(limit)
+        .offset(offset);
+
+      // Get total count
+      const totalResult = await (db as any).select({
+        count: sql`count(*)`.as('count')
+      }).from(schema.messages).where(eq(schema.messages.chatId, chatId));
+
+      const total = totalResult[0]?.count || 0;
+
+      res.json({
+        messages: messages.reverse(), // Oldest first
+        total,
+        hasMore: (offset + limit) < total,
+        chatId
+      });
+    } catch (err: any) {
+      log('❌ API Error /api/messages/chat/:chatId:', err?.message);
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  });
+
+  app.get('/api/messages/contact/:contactId', authenticate, async (req, res) => {
+    try {
+      const { contactId } = req.params;
+      const limit = Math.min(parseInt(req.query.limit as string) || 50, 500);
+      const offset = parseInt(req.query.offset as string) || 0;
+
+      const messages = await db
+        .select({
+          id: schema.messages.id,
+          chatId: schema.messages.chatId,
+          senderId: schema.messages.senderId,
+          displayName: schema.messages.displayName,
+          fromMe: schema.messages.fromMe,
+          type: schema.messages.type,
+          body: schema.messages.body,
+          timestamp: schema.messages.ts,
+          mimetype: schema.messages.mimetype,
+          filename: schema.messages.filename,
+          filesize: schema.messages.filesize,
+          durationMs: schema.messages.durationMs,
+        })
+        .from(schema.messages)
+        .where(eq(schema.messages.senderId, contactId))
+        .orderBy(desc(schema.messages.ts))
+        .limit(limit)
+        .offset(offset);
+
+      // Get contact info
+      const contact = await db
+        .select()
+        .from(schema.contacts)
+        .where(eq(schema.contacts.id, contactId))
+        .limit(1);
+
+      // Get total count
+      const totalResult = await (db as any).select({
+        count: sql`count(*)`.as('count')
+      }).from(schema.messages).where(eq(schema.messages.senderId, contactId));
+
+      const total = totalResult[0]?.count || 0;
+
+      res.json({
+        messages: messages.reverse(), // Oldest first
+        contact: contact[0] || null,
+        total,
+        hasMore: (offset + limit) < total,
+        contactId
+      });
+    } catch (err: any) {
+      log('❌ API Error /api/messages/contact/:contactId:', err?.message);
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  });
+
+  app.get('/api/messages/recent', authenticate, async (req, res) => {
+    try {
+      const limit = Math.min(parseInt(req.query.limit as string) || 100, 1000);
+
+      const messages = await db
+        .select({
+          id: schema.messages.id,
+          chatId: schema.messages.chatId,
+          senderId: schema.messages.senderId,
+          displayName: schema.messages.displayName,
+          fromMe: schema.messages.fromMe,
+          type: schema.messages.type,
+          body: schema.messages.body,
+          timestamp: schema.messages.ts,
+          mimetype: schema.messages.mimetype,
+          filename: schema.messages.filename,
+          filesize: schema.messages.filesize,
+          durationMs: schema.messages.durationMs,
+        })
+        .from(schema.messages)
+        .orderBy(desc(schema.messages.ts))
+        .limit(limit);
+
+      res.json({
+        messages: messages.reverse(), // Oldest first
+        total: messages.length,
+        limit
+      });
+    } catch (err: any) {
+      log('❌ API Error /api/messages/recent:', err?.message);
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  });
+
+  app.get('/api/messages/since', authenticate, async (req, res) => {
+    try {
+      const ts = parseInt(req.query.ts as string);
+      if (!ts || isNaN(ts)) {
+        return res.status(400).json({ error: 'Invalid timestamp parameter' });
+      }
+
+      const messages = await db
+        .select({
+          id: schema.messages.id,
+          chatId: schema.messages.chatId,
+          senderId: schema.messages.senderId,
+          displayName: schema.messages.displayName,
+          fromMe: schema.messages.fromMe,
+          type: schema.messages.type,
+          body: schema.messages.body,
+          timestamp: schema.messages.ts,
+          mimetype: schema.messages.mimetype,
+          filename: schema.messages.filename,
+          filesize: schema.messages.filesize,
+          durationMs: schema.messages.durationMs,
+        })
+        .from(schema.messages)
+        .where(gte(schema.messages.ts, ts))
+        .orderBy(desc(schema.messages.ts));
+
+      res.json({
+        messages: messages.reverse(), // Oldest first
+        total: messages.length,
+        since: ts
+      });
+    } catch (err: any) {
+      log('❌ API Error /api/messages/since:', err?.message);
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  });
+
+  // API Routes - Calls
+  app.get('/api/calls/recent', authenticate, async (req, res) => {
+    try {
+      const limit = Math.min(parseInt(req.query.limit as string) || 50, 500);
+
+      const calls = await db
+        .select({
+          id: schema.calls.id,
+          chatId: schema.calls.chatId,
+          callerId: schema.calls.callerId,
+          calleeId: schema.calls.calleeId,
+          isVideo: schema.calls.isVideo,
+          isGroup: schema.calls.isGroup,
+          timestamp: schema.calls.timestamp,
+          durationMs: schema.calls.durationMs,
+          status: schema.calls.status,
+          endTimestamp: schema.calls.endTimestamp,
+        })
+        .from(schema.calls)
+        .orderBy(desc(schema.calls.timestamp))
+        .limit(limit);
+
+      res.json({
+        calls: calls.reverse(), // Oldest first
+        total: calls.length,
+        limit
+      });
+    } catch (err: any) {
+      log('❌ API Error /api/calls/recent:', err?.message);
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  });
+
+  app.get('/api/calls/since', authenticate, async (req, res) => {
+    try {
+      const ts = parseInt(req.query.ts as string);
+      if (!ts || isNaN(ts)) {
+        return res.status(400).json({ error: 'Invalid timestamp parameter' });
+      }
+
+      const calls = await db
+        .select({
+          id: schema.calls.id,
+          chatId: schema.calls.chatId,
+          callerId: schema.calls.callerId,
+          calleeId: schema.calls.calleeId,
+          isVideo: schema.calls.isVideo,
+          isGroup: schema.calls.isGroup,
+          timestamp: schema.calls.timestamp,
+          durationMs: schema.calls.durationMs,
+          status: schema.calls.status,
+          endTimestamp: schema.calls.endTimestamp,
+        })
+        .from(schema.calls)
+        .where(gte(schema.calls.timestamp, ts))
+        .orderBy(desc(schema.calls.timestamp));
+
+      res.json({
+        calls: calls.reverse(), // Oldest first
+        total: calls.length,
+        since: ts
+      });
+    } catch (err: any) {
+      log('❌ API Error /api/calls/since:', err?.message);
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  });
+
   httpServer = app.listen(PORT, () => {
     log(`🌐 HTTP server listening on port ${PORT}`);
-    log(`📋 Endpoints: /qr, /status, /health`);
+    log(`📋 Public endpoints: /qr, /status, /health`);
+    log(`🔐 API endpoints: /api/messages/*, /api/calls/*`);
   });
 
   return app;
@@ -671,6 +1019,9 @@ function setupEventHandlers(c: any) {
     writeStatus({ state: 'connected', lastReadyAt: Date.now(), details: '' });
     log('✅ WhatsApp client is ready!');
     try {
+      // Create database indexes for API performance
+      await createIndexes();
+
       await bootstrap();
       scheduleBackfill();
       if (process.env.BACKFILL_ALL === 'true') {

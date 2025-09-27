@@ -67,3 +67,22 @@ export const calls = sqliteTable('calls', {
   status: text('status').notNull(),          // 'pending', 'connecting', 'in_progress', 'ended', 'rejected', 'missed'
   endTimestamp: integer('end_timestamp', { mode: 'number' }),     // When call actually ended
 });
+
+// INDEXES for API performance
+export const messageIndexes = {
+  chatIdTs: 'CREATE INDEX IF NOT EXISTS idx_messages_chatId_ts ON messages(chatId, ts DESC)',
+  senderIdTs: 'CREATE INDEX IF NOT EXISTS idx_messages_senderId_ts ON messages(senderId, ts DESC)',
+  ts: 'CREATE INDEX IF NOT EXISTS idx_messages_ts ON messages(ts DESC)',
+  type: 'CREATE INDEX IF NOT EXISTS idx_messages_type ON messages(type)',
+};
+
+export const callIndexes = {
+  timestamp: 'CREATE INDEX IF NOT EXISTS idx_calls_timestamp ON calls(timestamp DESC)',
+  chatId: 'CREATE INDEX IF NOT EXISTS idx_calls_chatId ON calls(chatId)',
+  callerId: 'CREATE INDEX IF NOT EXISTS idx_calls_callerId ON calls(callerId)',
+};
+
+export const chatIndexes = {
+  isGroup: 'CREATE INDEX IF NOT EXISTS idx_chats_isGroup ON chats(isGroup)',
+  archived: 'CREATE INDEX IF NOT EXISTS idx_chats_archived ON chats(archived)',
+};
