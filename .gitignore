@@ -28,8 +28,8 @@ out/raw.jsonl
 out/calls.jsonl
 
 # Keep these monitoring files (important for production)
-# out/service.log
-# out/status.json
+out/service.log
+out/status.json
 
 # OS generated files
 .DS_Store
