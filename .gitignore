@@ -25,6 +25,7 @@ out/messages.db
 
 # Raw data logs (large files, not needed in repo)
 out/raw.jsonl
+out/calls.jsonl
 
 # Keep these monitoring files (important for production)
 # out/service.log

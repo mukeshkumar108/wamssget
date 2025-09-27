@@ -131,6 +131,25 @@ let client: any = createClient();
 const contactCache = new Map<string, { savedName: string | null; pushname: string | null; timestamp: number }>();
 const CONTACT_CACHE_TTL = 24 * 60 * 60 * 1000; // 24 hours
 
+/* ===========================
+   Call state management
+=========================== */
+interface CallState {
+  id: string;
+  chatId: string;
+  callerId: string;
+  calleeId?: string;
+  isVideo: boolean;
+  isGroup: boolean;
+  status: 'pending' | 'connecting' | 'in_progress' | 'ended' | 'rejected' | 'missed';
+  startTime: number;
+  endTime?: number;
+  durationMs?: number;
+}
+
+const activeCalls = new Map<string, CallState>();
+const CALL_CACHE_TTL = 60 * 60 * 1000; // 1 hour (calls don't last longer than this)
+
 async function resolveContactName(
   id: string
 ): Promise<{ savedName: string | null; pushname: string | null }> {
@@ -304,6 +323,137 @@ async function saveMessage(m: Message, chat: Chat) {
   }
 
   log(`💬 New message in ${chat.name || displayName}`);
+}
+
+/* ===========================
+   Save call
+=========================== */
+async function saveCall(callEvent: any) {
+  try {
+    const callState = activeCalls.get(callEvent.id);
+    if (!callState) {
+      log(`📞 Call event (no active state): ${callEvent.id}`);
+      return;
+    }
+
+    const callRecord = {
+      id: callState.id,
+      chatId: callState.chatId,
+      callerId: callState.callerId,
+      calleeId: callState.calleeId,
+      isVideo: callState.isVideo,
+      isGroup: callState.isGroup,
+      timestamp: callState.startTime,
+      durationMs: callState.durationMs,
+      status: callState.status,
+      endTimestamp: callState.endTime,
+    };
+
+    // Write to raw JSONL first (backup)
+    const rawCallPath = path.join(OUTPUT_DIR, 'calls.jsonl');
+    fs.appendFileSync(rawCallPath, JSON.stringify({
+      ...callRecord,
+      rawEvent: callEvent,
+      capturedAt: Date.now()
+    }) + '\n', 'utf8');
+
+    // Database insert with error handling
+    await db
+      .insert(schema.calls)
+      .values(callRecord)
+      .onConflictDoNothing()
+      .execute();
+
+    // Update status
+    status.lastDbWriteAt = Date.now();
+
+    log(`📞 Call saved: ${callState.isVideo ? '🎥' : '📞'} ${callState.status} (${callState.durationMs ? Math.round(callState.durationMs / 1000) + 's' : 'unknown duration'})`);
+
+    // Clean up completed calls from memory
+    if (['ended', 'rejected', 'missed'].includes(callState.status)) {
+      activeCalls.delete(callEvent.id);
+    }
+
+  } catch (err: any) {
+    console.error('❌ Call save failed:', {
+      message: err?.message,
+      stack: err?.stack,
+      name: err?.name,
+      timestamp: new Date().toISOString(),
+      callId: callEvent.id
+    });
+  }
+}
+
+/* ===========================
+   Handle call events
+=========================== */
+function setupCallHandlers(client: any) {
+  // Main call event
+  client.on('call', async (callEvent: any) => {
+    try {
+      log(`📞 Call initiated: ${callEvent.id} ${callEvent.isVideo ? '🎥' : '📞'}`);
+
+      const callState: CallState = {
+        id: callEvent.id,
+        chatId: callEvent.to, // The chat/group being called
+        callerId: callEvent.from,
+        calleeId: callEvent.isGroup ? undefined : callEvent.to,
+        isVideo: callEvent.isVideo || false,
+        isGroup: callEvent.isGroup || false,
+        status: 'pending',
+        startTime: Date.now(),
+      };
+
+      activeCalls.set(callEvent.id, callState);
+
+    } catch (err: any) {
+      console.error('❌ Call event handling failed:', {
+        message: err?.message,
+        stack: err?.stack,
+        callId: callEvent?.id
+      });
+    }
+  });
+
+  // Call state changes
+  client.on('call:state_change', async (callEvent: any) => {
+    try {
+      const existingCall = activeCalls.get(callEvent.id);
+      if (!existingCall) {
+        log(`📞 Call state change for unknown call: ${callEvent.id}`);
+        return;
+      }
+
+      // Update call state
+      const updatedCall: CallState = {
+        ...existingCall,
+        status: callEvent.state || existingCall.status,
+      };
+
+      // Calculate duration if call is ending
+      if (['ended', 'rejected', 'missed'].includes(callEvent.state)) {
+        updatedCall.endTime = Date.now();
+        updatedCall.durationMs = updatedCall.endTime - updatedCall.startTime;
+      }
+
+      activeCalls.set(callEvent.id, updatedCall);
+
+      // Save to database when call completes
+      if (['ended', 'rejected', 'missed'].includes(callEvent.state)) {
+        await saveCall(callEvent);
+      }
+
+      log(`📞 Call ${callEvent.id} state: ${callEvent.state}`);
+
+    } catch (err: any) {
+      console.error('❌ Call state change handling failed:', {
+        message: err?.message,
+        stack: err?.stack,
+        callId: callEvent?.id
+      });
+    }
+  });
 }
 
 /* ===========================
@@ -543,6 +693,7 @@ setInterval(async () => {
 async function start() {
   writeStatus({ state: 'starting', details: 'Initializing client…' });
   setupEventHandlers(client);
+  setupCallHandlers(client); // Add call event handlers
   try {
     await client.initialize();
   } catch (err: any) {
