@@ -34,7 +34,7 @@ Runs headlessly 24/7, captures all messages/chats/contacts/reactions, and saves 
 ## 📊 Output Structure
 
 Messages are written to:
-- **Database** → `out/messages.db` (SQLite with tables: chats, contacts, messages, reactions)
+- **Database** → `data/app.sqlite` (SQLite with tables: chats, contacts, messages, reactions)
 - **Service Logs** → `out/service.log` (rotated, max 10MB, 3 backups)
 - **Status Monitor** → `out/status.json` (real-time service health)
 - **Debug Log** → `out/raw.jsonl` (raw message dump for troubleshooting)
@@ -53,18 +53,21 @@ reactions: id, messageId, emoji, senderId
 
 ### **Environment Variables**
 ```bash
-# Bootstrap settings
-BOOTSTRAP_CHAT_LIMIT=15          # Chats to process on startup
-BOOTSTRAP_MSG_LIMIT=20           # Messages per chat to fetch
+# API Security
+API_KEY=your-secret-api-key       # Required for API access
+
+# Bootstrap settings (memory-optimized)
+BOOTSTRAP_CHAT_LIMIT=10          # Chats to process on startup
+BOOTSTRAP_MSG_LIMIT=10           # Messages per chat to fetch
+
+# Backfill settings
+ENABLE_BACKFILL=true             # Enable periodic backfill operations
+BACKFILL_BATCH=100               # Messages per backfill batch
 
 # Timing settings
 HEARTBEAT_MS=30000               # Health check interval (30s)
 BASE_RETRY_MS=5000               # Initial retry delay
 MAX_RETRY_MS=60000               # Maximum retry delay
-
-# Backfill settings
-BACKFILL_BATCH=100               # Messages per backfill batch
-BACKFILL_ALL=true               # Enable immediate backfill on startup
 
 # Logging
 LOG_MAX_BYTES=10000000           # Log rotation size (10MB)
@@ -72,6 +75,10 @@ LOG_KEEP=3                       # Number of rotated logs to keep
 
 # Auth reset
 MAX_RETRIES_BEFORE_AUTH_RESET=5   # Reset auth after N failures
+
+# HTTP server
+HTTP_PORT=3000                   # Server port
+NODE_ENV=production              # Node environment
 ```
 
 ### **Default Configuration**
@@ -81,6 +88,19 @@ All settings have sensible defaults - works out of the box with environment over
 
 ## 🚀 Quick Start
 
+### **Docker (Recommended)**
+```bash
+# Clone and setup
+git clone https://github.com/<your-username>/whatsapp-get.git
+cd whatsapp-get
+
+# Run with production Docker setup
+docker-compose up --build
+
+# That's it! Container handles everything automatically
+```
+
+### **Manual/NPM Setup (Development)**
 ```bash
 # Clone and setup
 git clone https://github.com/<your-username>/whatsapp-get.git
@@ -96,10 +116,16 @@ npx ts-node index.ts
 ```
 
 ### **First Run**
-1. Scan QR code when prompted (Settings → Linked Devices → Link a Device)
-2. Service runs in background, capturing messages immediately
-3. Check `out/status.json` for service health
-4. Monitor `out/service.log` for detailed logs
+1. **Docker**: Wait for container to build and start (may take 2-3 minutes first time)
+2. **Manual**: Scan QR code when prompted
+3. Service runs in background, capturing messages immediately
+4. **Docker**: Check logs with `docker-compose logs -f`
+5. **Manual**: Check `out/status.json` for service health and `out/service.log` for logs
+6. Verify health endpoint: `curl http://localhost:3000/health`
+
+### **Database Location**
+- **Docker**: `data/app.sqlite` (persistent volume, survives container restarts)
+- **Manual**: `data/app.sqlite` (local directory)
 
 ### **HTTP API**
 Once running, the service exposes:
@@ -399,15 +425,25 @@ WhatsApp Get is a smart background service that automatically captures and store
 5. **Done!** Service runs in background capturing messages
 
 ### **🐳 Can I run this in Docker?**
-Absolutely! The service is fully containerized:
+Absolutely! The service includes production-ready docker-compose with persistent volumes:
 ```bash
-docker build -t whatsapp-get .
-docker run -d --name whatsapp-get \
-  -v whatsapp_auth:/app/.wwebjs_auth \
-  -v whatsapp_data:/app/out \
-  -p 3000:3000 \
-  whatsapp-get
+# Clone and run with production setup
+git clone https://github.com/your-username/whatsapp-get.git
+cd whatsapp-get
+docker-compose up --build
+
+# WhatsApp sessions persist in ./data directory
+# Database survives container restarts
 ```
+
+**Production features:**
+- Multi-stage TypeScript compilation
+- Cross-platform x86_64 builds for Ubuntu VPS
+- Persistent WhatsApp authentication
+- Automatic database migrations
+- Health checks with curl
+- Non-root security user
+- Chromium crashes prevented
 
 ### **🔑 How do I use the API?**
 ```bash
