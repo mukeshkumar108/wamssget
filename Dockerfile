@@ -1,53 +1,69 @@
-# Multi-stage build for optimal image size
-FROM node:20-alpine AS base
+# Multi-stage production build for TypeScript compilation
+FROM --platform=linux/amd64 node:20-slim AS build
 
-# Install system dependencies
-RUN apk add --no-cache \
-    chromium \
-    nss \
-    freetype \
-    freetype-dev \
-    harfbuzz \
-    ca-certificates \
-    ttf-freefont \
-    dumb-init
-
-# Create app user for security
-RUN addgroup -g 1001 -S nodejs && \
-    adduser -S whatsapp -u 1001
-
-FROM base AS dependencies
-
-# Install Python for node-gyp (required for some packages)
-RUN apk add --no-cache python3 python3-dev py3-setuptools make g++ sqlite-dev
+# Install build dependencies for better-sqlite3 native compilation
+RUN apt-get update && apt-get install -y \
+    python3 python3-dev make g++ libsqlite3-dev dumb-init \
+    --no-install-recommends && \
+    rm -rf /var/lib/apt/lists/*
 
 # Set working directory
 WORKDIR /app
 
-# Copy package files
+# Copy package files first for layer caching
 COPY package*.json ./
 
-# Install dependencies
-RUN npm ci --only=production && npm cache clean --force
+# Install all dependencies (including devDependencies for building)
+RUN npm ci
 
-# Force clean rebuild of better-sqlite3 for container architecture
-RUN rm -rf node_modules/better-sqlite3/build node_modules/.bin/better-sqlite3* ~/tmp/*
-RUN npm install better-sqlite3 --build-from-source --sqlite3-use-local=
-RUN npm rebuild better-sqlite3 --build-from-source
+# Copy all source files (including TypeScript and tsconfig.json)
+COPY . .
 
-FROM base AS runtime
+# Build TypeScript to JavaScript in dist/
+RUN npm run build
+
+# Remove dev dependencies to minimize image size but keep runtime dependencies
+RUN npm prune --production
+
+FROM --platform=linux/amd64 node:20-slim AS runtime
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y \
+    chromium \
+    ca-certificates \
+    dumb-init \
+    fonts-liberation \
+    --no-install-recommends && \
+    rm -rf /var/lib/apt/lists/*
+
+# Create app user for security
+RUN groupadd -r whatsapp -g 1001 && \
+    useradd -r whatsapp -u 1001 -g whatsapp -m -d /app
 
 # Set working directory
 WORKDIR /app
 
-# Copy installed dependencies from previous stage
-COPY --from=dependencies /app/node_modules ./node_modules
+# Copy built dependencies from build stage
+COPY --from=build /app/node_modules ./node_modules
 
-# Copy application code
-COPY . .
+# Copy compiled JavaScript from build stage
+COPY --from=build /app/dist ./dist
 
-# Create output directory
-RUN mkdir -p out && chown -R whatsapp:nodejs out
+# Copy package.json for metadata
+COPY package*.json ./
+
+# Copy types.d.ts and any other runtime-needed files (excluding source)
+COPY types.d.ts ./
+
+# Copy Drizzle config and migrations folder
+COPY drizzle.config.ts ./
+COPY drizzle ./drizzle
+
+# Create output directory with proper permissions
+RUN mkdir -p out && chown -R whatsapp:whatsapp out
+
+# Create auth directory with correct permissions
+RUN mkdir -p /app/.wwebjs_auth && chown -R whatsapp:whatsapp /app/.wwebjs_auth
 
 # Create non-root user and set permissions
 USER whatsapp
@@ -55,17 +71,20 @@ USER whatsapp
 # Set environment variables
 ENV NODE_ENV=production
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
-ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser
+ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 
 # Expose HTTP port
 EXPOSE 3000
 
 # Add health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-  CMD wget --no-verbose --tries=1 --spider http://localhost:3000/health || exit 1
+  CMD curl -f http://localhost:3000/health || exit 1
 
-# Use dumb-init to handle signals properly
-ENTRYPOINT ["/usr/bin/dumb-init", "--"]
+  # Copy entrypoint script
+COPY docker-entrypoint.sh /usr/local/bin/
 
-# Start the application
-CMD ["npx", "ts-node", "index.ts"]
+# Use it as entrypoint
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+
+# Start the application with compiled JavaScript (no ts-node)
+CMD ["node", "dist/index.js"]

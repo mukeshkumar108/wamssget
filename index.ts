@@ -8,7 +8,8 @@ import WAWebJS, { Message, Chat } from 'whatsapp-web.js';
 import { db, initDb } from './db/db';
 import * as schema from './db/schema';
 import { eq, desc, gte, and, sql } from "drizzle-orm";
-import express, { Request, Response } from 'express';
+import express from 'express';
+import { Request, Response } from 'express';
 import QRCode from 'qrcode';
 
 const { Client, LocalAuth } = WAWebJS as any;
@@ -19,7 +20,18 @@ const { Client, LocalAuth } = WAWebJS as any;
 const OUTPUT_DIR = path.join(process.cwd(), 'out');
 const RAW_PATH = path.join(OUTPUT_DIR, 'raw.jsonl');
 const STATUS_PATH = path.join(OUTPUT_DIR, 'status.json');
+
+// Create output directory only if it doesn't exist (not required in container)
+try {
+  if (!fs.existsSync(OUTPUT_DIR)) {
+    fs.mkdirSync(OUTPUT_DIR, { recursive: true });
+  }
+} catch (err) {
+  console.warn('Could not create output directory:', err);
+}
 const AUTH_DIR = path.join(process.cwd(), '.wwebjs_auth');
+
+const ENABLE_BACKFILL = process.env.ENABLE_BACKFILL !== 'false';
 
 const BOOTSTRAP_CHAT_LIMIT = +(process.env.BOOTSTRAP_CHAT_LIMIT || 15);
 const BOOTSTRAP_MSG_LIMIT  = +(process.env.BOOTSTRAP_MSG_LIMIT  || 20);
@@ -158,7 +170,16 @@ function createClient() {
     authStrategy: new LocalAuth({ dataPath: './.wwebjs_auth' }),
     puppeteer: {
       headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox'],
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-accelerated-2d-canvas',
+        '--disable-gpu',
+        '--no-zygote',
+        '--single-process'
+      ],
+      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium',
     },
   });
 }
@@ -242,7 +263,7 @@ function startHTTPServer() {
   };
 
   // QR endpoint - serves current QR as base64
-  app.get('/qr', (req, res) => {
+  app.get('/qr', (req: Request, res: Response) => {
     if (!currentQRBase64) {
       return res.status(404).json({
         error: 'No QR code available',
@@ -259,7 +280,7 @@ function startHTTPServer() {
   });
 
   // Status endpoint - comprehensive service health
-  app.get('/status', (req, res) => {
+  app.get('/status', (req: Request, res: Response) => {
     const uptime = Date.now() - (status.lastReadyAt || Date.now());
     const dbSize = fs.existsSync(path.join(OUTPUT_DIR, 'messages.db'))
       ? fs.statSync(path.join(OUTPUT_DIR, 'messages.db')).size
@@ -283,7 +304,7 @@ function startHTTPServer() {
   });
 
   // Health check endpoint for containers
-  app.get('/health', (req, res) => {
+  app.get('/health', (req: Request, res: Response) => {
     const isHealthy = status.state === 'connected' &&
                      (Date.now() - status.lastMessageAt) < (10 * 60 * 1000); // 10 minutes
 
@@ -296,7 +317,7 @@ function startHTTPServer() {
   });
 
   // API Routes - Messages
-  app.get('/api/messages/recent-chats', authenticate, async (req, res) => {
+  app.get('/api/messages/recent-chats', authenticate, async (req: Request, res: Response) => {
     try {
       const chatsCount = Math.min(parseInt(req.query.chats as string) || 5, 50);
       const messagesPerChat = Math.min(parseInt(req.query.messages as string) || 10, 100);
@@ -350,7 +371,7 @@ function startHTTPServer() {
     }
   });
 
-  app.get('/api/messages/chat/:chatId', authenticate, async (req, res) => {
+  app.get('/api/messages/chat/:chatId', authenticate, async (req: Request, res: Response) => {
     try {
       const { chatId } = req.params;
       const limit = Math.min(parseInt(req.query.limit as string) || 50, 500);
@@ -396,7 +417,7 @@ function startHTTPServer() {
     }
   });
 
-  app.get('/api/messages/contact/:contactId', authenticate, async (req, res) => {
+  app.get('/api/messages/contact/:contactId', authenticate, async (req: Request, res: Response) => {
     try {
       const { contactId } = req.params;
       const limit = Math.min(parseInt(req.query.limit as string) || 50, 500);
@@ -450,7 +471,7 @@ function startHTTPServer() {
     }
   });
 
-  app.get('/api/messages/recent', authenticate, async (req, res) => {
+  app.get('/api/messages/recent', authenticate, async (req: Request, res: Response) => {
     try {
       const limit = Math.min(parseInt(req.query.limit as string) || 100, 1000);
 
@@ -484,7 +505,7 @@ function startHTTPServer() {
     }
   });
 
-  app.get('/api/messages/since', authenticate, async (req, res) => {
+  app.get('/api/messages/since', authenticate, async (req: Request, res: Response) => {
     try {
       const ts = parseInt(req.query.ts as string);
       if (!ts || isNaN(ts)) {
@@ -522,7 +543,7 @@ function startHTTPServer() {
   });
 
   // API Routes - Calls
-  app.get('/api/calls/recent', authenticate, async (req, res) => {
+  app.get('/api/calls/recent', authenticate, async (req: Request, res: Response) => {
     try {
       const limit = Math.min(parseInt(req.query.limit as string) || 50, 500);
 
@@ -554,7 +575,7 @@ function startHTTPServer() {
     }
   });
 
-  app.get('/api/calls/since', authenticate, async (req, res) => {
+  app.get('/api/calls/since', authenticate, async (req: Request, res: Response) => {
     try {
       const ts = parseInt(req.query.ts as string);
       if (!ts || isNaN(ts)) {
@@ -905,57 +926,135 @@ function setupCallHandlers(client: any) {
 }
 
 /* ===========================
-   Bootstrap
+   Helper functions
 =========================== */
-async function bootstrap() {
-  const chats: Chat[] = await client.getChats();
-  const filtered = chats
-    .filter((c: Chat) => resolvedChatName(c) !== 'WhatsApp')
-    .slice(0, BOOTSTRAP_CHAT_LIMIT);
+async function delay(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
 
-  log(`📂 Found ${chats.length} chats`);
-  for (const chat of filtered) {
-    log(`➡️ Chat: ${resolvedChatName(chat)}`);
-    const messages = await chat.fetchMessages({ limit: BOOTSTRAP_MSG_LIMIT });
-    for (const m of messages) {
-      await saveMessage(m, chat);
-    }
-  }
-  log('💾 Saved messages to raw.jsonl and database');
+async function getMessageCount(chatId: string): Promise<number> {
+  const result = await (db as any).select({
+    count: sql`count(*)`.as('count')
+  }).from(schema.messages).where(eq(schema.messages.chatId, chatId));
+  return result[0]?.count || 0;
+}
+
+async function getActiveChatsLast24h(limit: number): Promise<Array<{chatId: string, count: number}>> {
+  const sinceTs = Date.now() - (24 * 60 * 60 * 1000); // 24 hours ago
+  const result = await (db as any).select({
+    chatId: schema.messages.chatId,
+    count: sql`count(*)`.as('count')
+  }).from(schema.messages)
+    .where(gte(schema.messages.ts, sinceTs))
+    .groupBy(schema.messages.chatId)
+    .orderBy(desc(sql`count(*)`))
+    .limit(limit);
+  return result.map((row: any) => ({ chatId: row.chatId, count: row.count }));
+}
+
+async function getChatsByRecency(limit: number): Promise<Chat[]> {
+  const allChats = await client.getChats();
+  const filtered = allChats
+    .filter((c: Chat) => resolvedChatName(c) !== 'WhatsApp')
+    .slice(0, limit);
+  return filtered;
 }
 
 /* ===========================
-   Backfill worker
+   Bootstrap
 =========================== */
-async function backfill() {
+async function bootstrap() {
+  const chats = await getChatsByRecency(10); // Only 10 most recent chats
+
+  log(`📂 Found ${chats.length} chats for bootstrap`);
+  for (const chat of chats) {
+    log(`➡️ Bootstrap chat: ${resolvedChatName(chat)}`);
+    const messages = await chat.fetchMessages({ limit: 10 }); // Only last 10 messages
+    for (const m of messages) {
+      await saveMessage(m, chat); // Save each immediately
+    }
+  }
+  log('💾 Bootstrap complete - switched to live listening');
+}
+
+/* ===========================
+   Progressive Enrichment (replaces old backfill)
+=========================== */
+async function progressiveEnrichment() {
+  if (!ENABLE_BACKFILL) {
+    log('ℹ️ Progressive enrichment skipped (ENABLE_BACKFILL=false)');
+    return;
+  }
+
   try {
-    log(`🔄 Backfill: scanning chats…`);
-    const chats: Chat[] = await client.getChats();
+    log(`🔄 Starting progressive enrichment...`);
 
-    for (const chat of chats) {
-      if (resolvedChatName(chat) === 'WhatsApp') continue;
+    // Get all chats by recency (more than 20 to select from)
+    const allChats = await getChatsByRecency(25); // Get more than needed to select from
 
-      const existing = await db
-        .select()
-        .from(schema.messages)
-        .where(eq(schema.messages.chatId, chat.id._serialized))
-        .limit(1);
-
-      if (existing.length < 100) {
-        log(
-          `📥 Backfilling ${BACKFILL_BATCH} messages for ${resolvedChatName(
-            chat
-          )}`
-        );
-        const msgs = await chat.fetchMessages({ limit: BACKFILL_BATCH });
+    // Phase 1: For initial 10 chats, enrich if <20 messages
+    const phase1Chats = allChats.slice(0, 10);
+    log(`📥 Phase 1: Processing ${phase1Chats.length} chats (enrich <20 messages)`);
+    for (const chat of phase1Chats) {
+      const count = await getMessageCount(chat.id._serialized);
+      if (count < 20) {
+        log(`➡️ Enriching ${resolvedChatName(chat)} (${count} → ${count + 20} messages)`);
+        const msgs = await chat.fetchMessages({ limit: 20 });
         for (const m of msgs) {
           await saveMessage(m, chat);
         }
       }
+      await delay(1500); // 1.5s delay between chats
     }
-    log('✅ Backfill complete');
+
+    // Phase 2: For next 10 chats (11-20), fetch 30 messages each
+    const phase2Chats = allChats.slice(10, 20);
+    log(`📥 Phase 2: Processing ${phase2Chats.length} chats (30 messages each)`);
+    for (const chat of phase2Chats) {
+      log(`➡️ Fetching 30 messages for ${resolvedChatName(chat)}`);
+      const msgs = await chat.fetchMessages({ limit: 30 });
+      for (const m of msgs) {
+        await saveMessage(m, chat);
+      }
+      await delay(1500); // 1.5s delay between chats
+    }
+
+    log('✅ Progressive enrichment complete');
   } catch (err: any) {
-    console.error("❌ Backfill error:", {
+    console.error("❌ Progressive enrichment error:", {
+      message: err?.message,
+      stack: err?.stack,
+      name: err?.name,
+      timestamp: new Date().toISOString()
+    });
+  }
+}
+
+/* ===========================
+   Daily active chat backfill
+=========================== */
+async function dailyActiveChatBackfill() {
+  if (!ENABLE_BACKFILL) return;
+
+  try {
+    log(`📊 Daily active chat backfill: finding top 10 chats by recent activity...`);
+    const activeChats = await getActiveChatsLast24h(10);
+
+    for (const { chatId, count: recentCount } of activeChats) {
+      const totalCount = await getMessageCount(chatId);
+      if (totalCount < 20) {
+        log(`📥 Daily: ${chatId} has ${totalCount} stored, fetching 20 more (recent activity: ${recentCount})`);
+        const chat = await client.getChatById(chatId);
+        const msgs = await chat.fetchMessages({ limit: 20 });
+        for (const m of msgs) {
+          await saveMessage(m, chat);
+        }
+        await delay(1500); // Respectful delay
+      }
+    }
+    log('✅ Daily active chat backfill complete');
+  } catch (err: any) {
+    console.error("❌ Daily active chat backfill error:", {
       message: err?.message,
       stack: err?.stack,
       name: err?.name,
@@ -968,21 +1067,26 @@ async function backfill() {
    Backfill scheduler
 =========================== */
 function scheduleBackfill() {
-  // Initial run: 10 minutes after login
-  setTimeout(() => {
-    log("🕒 Running initial delayed backfill (10m after login)...");
-    backfill();
-  }, 10 * 60 * 1000);
+  if (!ENABLE_BACKFILL) {
+    log('ℹ️ Backfill scheduling skipped (ENABLE_BACKFILL=false)');
+    return;
+  }
 
-  // Daily run: every 24h ±30m jitter
+  // Initial progressive enrichment: 2 minutes after login
+  setTimeout(() => {
+    log("🕒 Running initial progressive enrichment (2m after login)...");
+    progressiveEnrichment();
+  }, 2 * 60 * 1000);
+
+  // Daily active chat backfill: every 24h ±1h jitter
   const DAY_MS = 24 * 60 * 60 * 1000;
   setInterval(() => {
-    const jitter = (Math.random() - 0.5) * 60 * 60 * 1000; // ±30m
+    const jitter = (Math.random() - 0.5) * 2 * 60 * 60 * 1000; // ±1h
     const delay = Math.max(0, DAY_MS + jitter);
 
-    log(`🕒 Scheduling daily backfill with jitter (${(delay/60000).toFixed(0)}m)...`);
+    log(`🕒 Scheduling daily active chat backfill with jitter (${(delay/60000).toFixed(0)}m)...`);
     setTimeout(() => {
-      backfill();
+      dailyActiveChatBackfill();
     }, delay);
   }, DAY_MS);
 }
@@ -1022,9 +1126,6 @@ function setupEventHandlers(c: any) {
 
       await bootstrap();
       scheduleBackfill();
-      if (process.env.BACKFILL_ALL === 'true') {
-        setTimeout(() => backfill(), 5_000);
-      }
     } catch (err: any) {
       writeStatus({
         state: 'error',

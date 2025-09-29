@@ -6,11 +6,11 @@ import { drizzle } from "drizzle-orm/better-sqlite3";
 import { migrate } from "drizzle-orm/better-sqlite3/migrator";
 import * as schema from "./schema";
 
-// ensure `out/` dir exists
-const OUT_DIR = path.join(process.cwd(), "out");
-if (!fs.existsSync(OUT_DIR)) fs.mkdirSync(OUT_DIR, { recursive: true });
+// ensure `data/` dir exists (persistent volume)
+const DATA_DIR = path.join(process.cwd(), "data");
+if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
-const DB_PATH = path.join(OUT_DIR, "messages.db");
+const DB_PATH = path.join(DATA_DIR, "app.sqlite");
 
 // open SQLite database
 const sqlite = new Database(DB_PATH);
