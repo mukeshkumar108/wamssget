@@ -80,8 +80,9 @@ EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
   CMD curl -f http://localhost:3000/health || exit 1
 
-  # Copy entrypoint script
+# Copy entrypoint script
 COPY docker-entrypoint.sh /usr/local/bin/
+# RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 # Use it as entrypoint
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]

@@ -8,6 +8,10 @@ services:
     restart: unless-stopped
     shm_size: '1gb'
 
+    # Load environment variables from .env file
+    env_file:
+      - .env
+
     # Persistent volumes for auth and data
     volumes:
       - auth_data:/app/.wwebjs_auth
