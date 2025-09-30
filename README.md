@@ -28,6 +28,8 @@ Runs headlessly 24/7, captures all messages/chats/contacts/reactions, and saves 
 - ✅ **Environment Variables**: Extensive configuration options
 - ✅ **Status Tracking**: Real-time service status in JSON format
 - ✅ **Performance Tuning**: Configurable batch sizes and timing
+- ✅ **Zero-Loss Continuity**: Crash-proof message recovery system
+- ✅ **Continuous Archives**: Always-on JSONL message backups
 
 ---
 
@@ -79,6 +81,9 @@ MAX_RETRIES_BEFORE_AUTH_RESET=5   # Reset auth after N failures
 # HTTP server
 HTTP_PORT=3000                   # Server port
 NODE_ENV=production              # Node environment
+
+# Continuity monitoring
+CONTINUITY_WARN_MINUTES=10       # Warn if continuity watermark stale >10 min
 ```
 
 ### **Default Configuration**

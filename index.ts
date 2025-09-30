@@ -228,6 +228,9 @@ function createClient() {
 
 let client: any = createClient();
 
+// Track successful initial connection (for heartbeat logic)
+let everConnected = false;  // Only activate aggressive heartbeat after first success
+
 /* ===========================
    Contact cache
 =========================== */
@@ -1293,22 +1296,37 @@ async function scheduleReconnect() {
 }
 
 /* ===========================
-   Heartbeat
+   Heartbeat - Only active after first connection
 =========================== */
 setInterval(async () => {
   const now = Date.now();
 
   try {
     const s = await client.getState();
+
     if (s !== 'CONNECTED') {
-      log(`⚠️ Heartbeat: client state = ${s}. Triggering reconnect.`);
+      // Only trigger ACTIVE reconnection if we fell from connected state
+      // During initial connection, just observe without trying to fix
+      if (everConnected) {
+        log(`⚠️ Heartbeat: client disconnected (state = ${s}). Triggering reconnect.`);
+        await scheduleReconnect();
+        return;
+      } else {
+        log(`⏳ Heartbeat: Initial connection in progress (state = ${s}). Waiting...`);
+        // Don't trigger reconnection during first-time setup
+        return;
+      }
+    }
+  } catch (err) {
+    // Similar logic for state check failures
+    if (everConnected) {
+      log('❌ Heartbeat: Cannot determine client state. Triggering reconnect.');
       await scheduleReconnect();
       return;
+    } else {
+      log('⏳ Heartbeat: Cannot check state during initial connection attempt.');
+      return;
     }
-  } catch {
-    log('❌ Heartbeat: failed to get client state. Triggering reconnect.');
-    await scheduleReconnect();
-    return;
   }
 
   const sinceMsg = status.lastMessageAt ? now - status.lastMessageAt : null;
@@ -1350,13 +1368,30 @@ async function start() {
   try {
     await client.initialize();
   } catch (err: any) {
-    console.error('⚠️ Initial init failed:', {
+    console.error('⚠️ Initial client init failed:', {
       message: err?.message,
       stack: err?.stack,
       name: err?.name,
       timestamp: new Date().toISOString()
     });
-    await scheduleReconnect();
+
+    // For initial connection failures, create new client and retry immediately
+    // This prevents container restart and QR rescanning
+    log('🔄 Creating new Puppeteer client for immediate retry...');
+    client = createClient();
+    setupEventHandlers(client);
+    setupCallHandlers(client);
+
+    // Retry initialization with new client
+    try {
+      log('🔄 Retrying WhatsApp initialization...');
+      await delay(1000); // Brief pause before retry
+      await client.initialize();
+    } catch (retryErr: any) {
+      log('❌ Retry also failed, entering standard reconnection loop');
+      // Only then fall back to scheduleReconnect (which might still need auth reset)
+      await scheduleReconnect();
+    }
   }
 }
 
