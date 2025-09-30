@@ -978,6 +978,18 @@ async function delay(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+// Check if WhatsApp connection is stable enough for bootstrap operations
+async function isConnectionStable(): Promise<boolean> {
+  try {
+    const state = await client.getState();
+    // Require: CONNECTED state + 3 seconds uptime to stabilize
+    const uptimeMs = Date.now() - status.lastReadyAt;
+    return state === 'CONNECTED' && uptimeMs > 3000;
+  } catch {
+    return false; // If can't get state, assume unstable
+  }
+}
+
 async function getMessageCount(chatId: string): Promise<number> {
   const result = await (db as any).select({
     count: sql`count(*)`.as('count')
@@ -1166,12 +1178,25 @@ function setupEventHandlers(c: any) {
   c.on('ready', async () => {
     writeStatus({ state: 'connected', lastReadyAt: Date.now(), details: '' });
     log('✅ WhatsApp client is ready!');
+
+    // Allow browser session to stabilize before heavy operations
+    await delay(2000);
+
     try {
-      // Create database indexes for API performance
+      // Create database indexes for API performance (non-fatal)
       await createIndexes();
 
-      await bootstrap();
-      scheduleBackfill();
+      // Only bootstrap if connection is verified stable
+      if (await isConnectionStable()) {
+        await bootstrap();
+        scheduleBackfill();
+      } else {
+        log('⏳ Bootstrap postponed - waiting for additional connection stability');
+        setTimeout(async () => {
+          await bootstrap();
+          scheduleBackfill();
+        }, 2000);
+      }
     } catch (err: any) {
       writeStatus({
         state: 'error',
