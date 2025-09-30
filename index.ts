@@ -231,6 +231,18 @@ let client: any = createClient();
 // Track successful initial connection (for heartbeat logic)
 let everConnected = false;  // Only activate aggressive heartbeat after first success
 
+// Track successful authentication (for QR lifecycle control)
+let everAuthenticated = false;  // Key indicator of LocalAuth session validity
+
+// Track last successfully authentified time for heartbeat grace period
+let lastAuthTime = 0;
+
+// Prevent message processing before indexes are ready
+let indexesReady = false;
+
+// Bootstrap completion flag - heartbeat only activates after first successful bootstrap
+let bootstrapComplete = false;
+
 /* ===========================
    Contact cache
 =========================== */
@@ -1035,7 +1047,11 @@ async function bootstrap() {
       await saveMessage(m, chat); // Save each immediately
     }
   }
+
+  // ✅ CRITICAL: Mark bootstrap as complete to activate heartbeat
+  bootstrapComplete = true;
   log('💾 Bootstrap complete - switched to live listening');
+  log('❤️ Monitor heartbeat started - service fully operational');
 }
 
 /* ===========================
@@ -1157,7 +1173,22 @@ function scheduleBackfill() {
    Event handlers
 =========================== */
 function setupEventHandlers(c: any) {
+  // Track successful authentication for QR lifecycle management
+  c.on('authenticated', () => {
+    lastAuthTime = Date.now();
+    everAuthenticated = true;
+    log('🔐 WhatsApp authentication completed - session established at ' + new Date(lastAuthTime).toISOString());
+  });
+
   c.on('qr', async (qr: string) => {
+    // Skip QR generation ONLY after successful authentication
+    if (everAuthenticated) {
+      log('🔄 QR regeneration skipped (already authenticated once)');
+      return;
+    }
+
+    log('🔐 First-time auth QR displayed'); // Explicit first-time auth log
+    // Always show QR during initial authentication, even during reconnections
     currentQR = qr;
     currentQRBase64 = await generateQRBase64(qr);
 
@@ -1179,42 +1210,97 @@ function setupEventHandlers(c: any) {
   });
 
   c.on('ready', async () => {
-    writeStatus({ state: 'connected', lastReadyAt: Date.now(), details: '' });
+    status.lastReadyAt = Date.now(); // Set timestamp immediately
+    writeStatus({ state: 'connected', lastReadyAt: status.lastReadyAt, details: '' });
     log('✅ WhatsApp client is ready!');
+    everConnected = true; // Mark that we successfully connected
 
     // Allow browser session to stabilize before heavy operations
     await delay(2000);
 
     try {
-      // Create database indexes for API performance (non-fatal)
+      // Create database indexes for API performance (this must succeed before messages)
       await createIndexes();
+      indexesReady = true; // 🔑 Critical: Allow message processing now
+      log('🔓 Database indexes ready - message processing enabled');
 
       // Only bootstrap if connection is verified stable
-      if (await isConnectionStable()) {
+      let isStable = false;
+      try {
+        isStable = await isConnectionStable();
+      } catch (checkErr: any) {
+        console.error('❌ Connection stability check failed:', {
+          message: checkErr?.message,
+          stack: checkErr?.stack,
+          timestamp: new Date().toISOString()
+        });
+        isStable = false; // Force postponed bootstrap on error
+      }
+
+      if (isStable) {
         await bootstrap();
         scheduleBackfill();
       } else {
         log('⏳ Bootstrap postponed - waiting for additional connection stability');
-        setTimeout(async () => {
-          await bootstrap();
-          scheduleBackfill();
-        }, 2000);
+        // ✅ CRITICAL: Also wrap this timeout in try-catch to prevent unhandled exceptions
+        try {
+          setTimeout(async () => {
+            await bootstrap();
+            scheduleBackfill();
+          }, 2000);
+        } catch (bootstrapErr: any) {
+          console.error('❌ Delayed bootstrap error:', {
+            message: bootstrapErr?.message,
+            stack: bootstrapErr?.stack,
+            timestamp: new Date().toISOString()
+          });
+          // ✅ CRITICAL: Trigger reconnection, NOT container exit
+          await scheduleReconnect();
+        }
       }
     } catch (err: any) {
-      writeStatus({
-        state: 'error',
-        details: `Bootstrap failed: ${err?.message || err}`,
-      });
-      console.error('❌ Bootstrap error:', {
+      // ✅ CRITICAL: Any error in ready handler operations should trigger reconnection, NOT kill container
+      console.error('❌ Bootstrap error (will reconnect):', {
         message: err?.message,
         stack: err?.stack,
         name: err?.name,
         timestamp: new Date().toISOString()
       });
+
+      writeStatus({
+        state: 'reconnecting',
+        details: `Bootstrap failed: ${err?.message || err}`,
+      });
+
+      // ✅ CRITICAL: Trigger reconnection within same container session
+      await scheduleReconnect();
     }
   });
 
   c.on('message_create', async (m: Message) => {
+    // Wait for database indexes to be ready before processing messages
+    if (!indexesReady) {
+      log(`⏸️ Message received before indexes ready, deferring: ${m.id.id}`);
+      setTimeout(async () => {
+        try {
+          if (indexesReady) { // Double-check
+            const chat = await m.getChat();
+            await saveMessage(m, chat);
+          } else {
+            log(`❌ Dropped message (indexes still not ready): ${m.id.id}`);
+          }
+        } catch (err: any) {
+          console.error('❌ Failed to save deferred message:', {
+            message: err?.message,
+            stack: err?.stack,
+            name: err?.name,
+            messageId: m?.id?.id || 'unknown'
+          });
+        }
+      }, 1000); // Check again in 1 second
+      return;
+    }
+
     try {
       const chat = await m.getChat();
       await saveMessage(m, chat);
@@ -1258,10 +1344,21 @@ async function scheduleReconnect() {
     BASE_RETRY_MS * Math.pow(2, status.retryCount - 1),
     MAX_RETRY_MS
   );
-  writeStatus({
-    state: 'reconnecting',
-    details: `Retry #${status.retryCount} in ${delay}ms`,
-  });
+
+  // Different messages depending on authentication state
+  if (everAuthenticated) {
+    log('🔄 Silent reconnect (session already authenticated)');
+    writeStatus({
+      state: 'reconnecting',
+      details: `Silent retry #${status.retryCount} in ${delay}ms`,
+    });
+  } else {
+    log('🔐 No session yet — showing QR again soon');
+    writeStatus({
+      state: 'reconnecting',
+      details: `First-time retry #${status.retryCount} in ${delay}ms`,
+    });
+  }
 
   if (reconnectTimer) clearTimeout(reconnectTimer);
   reconnectTimer = setTimeout(async () => {
@@ -1280,6 +1377,7 @@ async function scheduleReconnect() {
           fs.rmSync(AUTH_DIR, { recursive: true, force: true });
         } catch {}
         status.retryCount = 0;
+        everAuthenticated = false; // Reset auth state for fresh start
       }
 
       await client.initialize();
@@ -1296,9 +1394,15 @@ async function scheduleReconnect() {
 }
 
 /* ===========================
-   Heartbeat - Only active after first connection
+   Heartbeat - Only active after bootstrap completes
 =========================== */
 setInterval(async () => {
+  // Prevent heartbeat from running during bootstrap phase
+  if (!bootstrapComplete) {
+    log(`⏳ Skipping heartbeat (bootstrap in progress)`);
+    return;
+  }
+
   const now = Date.now();
 
   try {
@@ -1308,6 +1412,11 @@ setInterval(async () => {
       // Only trigger ACTIVE reconnection if we fell from connected state
       // During initial connection, just observe without trying to fix
       if (everConnected) {
+        // ✅ Add grace period: Don't immediately panic after authentication
+        if (Date.now() - lastAuthTime < 30000) { // 30-second grace period
+          log(`⏳ Ignoring transient null state (${(Date.now() - lastAuthTime) / 1000}s after auth)`);
+          return;
+        }
         log(`⚠️ Heartbeat: client disconnected (state = ${s}). Triggering reconnect.`);
         await scheduleReconnect();
         return;
@@ -1318,8 +1427,13 @@ setInterval(async () => {
       }
     }
   } catch (err) {
-    // Similar logic for state check failures
+    // Similar logic for state check failures - with the same grace period
     if (everConnected) {
+      // ✅ Same grace period logic applies to state check failures
+      if (Date.now() - lastAuthTime < 30000) {
+        log(`⏳ Ignoring transient state check failure (${(Date.now() - lastAuthTime) / 1000}s after auth)`);
+        return;
+      }
       log('❌ Heartbeat: Cannot determine client state. Triggering reconnect.');
       await scheduleReconnect();
       return;
@@ -1410,5 +1524,52 @@ async function shutdown() {
 
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
+
+// Handle uncaught errors and rejections gracefully - DON'T let them crash the container
+process.on('uncaughtException', async (err) => {
+  console.error('🚨 Uncaught Exception - attempting graceful recovery:', {
+    message: err?.message,
+    stack: err?.stack,
+    name: err?.name,
+    timestamp: new Date().toISOString()
+  });
+
+  // If we were connected at least once, try to reconnect
+  if (everConnected) {
+    try {
+      writeStatus({ state: 'reconnecting', details: `Uncaught error recovery: ${err?.message}` });
+      await scheduleReconnect();  // Graceful reconnection attempt
+    } catch (reconnectErr) {
+      console.error('❌ Reconnection failed after uncaught exception:', reconnectErr);
+      process.exit(1);  // Only exit if reconnection also fails
+    }
+  } else {
+    // During initial connection, restart with new QR
+    console.error('❌ Uncaught exception during initial connection - restarting');
+    process.exit(1);  // Acceptable to restart during initial setup
+  }
+});
+
+process.on('unhandledRejection', async (reason, promise) => {
+  console.error('🚨 Unhandled Rejection - attempting graceful recovery:', {
+    reason: reason,
+    promise: promise,
+    timestamp: new Date().toISOString()
+  });
+
+  // Similar handling as uncaught exceptions
+  if (everConnected) {
+    try {
+      writeStatus({ state: 'reconnecting', details: `Unhandled rejection recovery: ${reason}` });
+      await scheduleReconnect();
+    } catch (reconnectErr) {
+      console.error('❌ Reconnection failed after unhandled rejection:', reconnectErr);
+      process.exit(1);
+    }
+  } else {
+    console.error('❌ Unhandled rejection during initial connection - restarting');
+    process.exit(1);
+  }
+});
 
 start();
