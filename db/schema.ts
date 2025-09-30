@@ -54,6 +54,12 @@ export const reactions = sqliteTable('reactions', {
   senderId: text('sender_id'),
 });
 
+// CONTINUITY - message processing watermark for zero-loss recovery
+export const continuity = sqliteTable('continuity', {
+  id: integer('id').primaryKey().default(1),  // Single row table
+  lastProcessedTimestamp: integer('last_processed_timestamp', { mode: 'number' }).notNull().default(0),
+});
+
 // CALLS
 export const calls = sqliteTable('calls', {
   id: text('id').primaryKey(),              // WhatsApp call ID

@@ -8,6 +8,56 @@ import WAWebJS, { Message, Chat } from 'whatsapp-web.js';
 import { db, initDb } from './db/db';
 import * as schema from './db/schema';
 import { eq, desc, gte, and, sql } from "drizzle-orm";
+
+// Continuity management for zero-loss message recovery
+let lastProcessedTimestamp = 0;
+
+async function initializeContinuity(): Promise<void> {
+  try {
+    // Try to get existing continuity record
+    const continuityRecords = await db
+      .select({ lastProcessedTimestamp: schema.continuity.lastProcessedTimestamp })
+      .from(schema.continuity)
+      .limit(1);
+
+    if (continuityRecords.length > 0) {
+      lastProcessedTimestamp = continuityRecords[0].lastProcessedTimestamp || 0;
+      log(`📊 Loaded continuity watermark: ${lastProcessedTimestamp} (${new Date(lastProcessedTimestamp).toISOString()})`);
+    } else {
+      // Initialize continuity record
+      await db
+        .insert(schema.continuity)
+        .values({
+          id: 1,
+          lastProcessedTimestamp: 0
+        })
+        .onConflictDoNothing()
+        .execute();
+
+      lastProcessedTimestamp = 0;
+      log('📊 Initialized new continuity record at timestamp 0');
+    }
+  } catch (err: any) {
+    log('⚠️ Failed to initialize continuity, falling back to 0:', err?.message);
+    lastProcessedTimestamp = 0;
+  }
+}
+
+// Update continuity watermark in both memory and database
+async function updateContinuity(timestamp: number): Promise<void> {
+  lastProcessedTimestamp = Math.max(lastProcessedTimestamp, timestamp);
+
+  try {
+    await db
+      .update(schema.continuity)
+      .set({ lastProcessedTimestamp })
+      .where(eq(schema.continuity.id, 1))
+      .execute();
+  } catch (err: any) {
+    console.error('❌ Failed to update continuity in DB:', err?.message);
+    // Continue with memory update - DB failure shouldn't break message processing
+  }
+}
 import express from 'express';
 import { Request, Response } from 'express';
 import QRCode from 'qrcode';
@@ -15,7 +65,7 @@ import QRCode from 'qrcode';
 const { Client, LocalAuth } = WAWebJS as any;
 
 /* ===========================
-   Config
+   Config & State
 =========================== */
 const OUTPUT_DIR = path.join(process.cwd(), 'out');
 const RAW_PATH = path.join(OUTPUT_DIR, 'raw.jsonl');
@@ -52,7 +102,7 @@ const BACKFILL_BATCH = +(process.env.BACKFILL_BATCH || 100);
 if (!fs.existsSync(OUTPUT_DIR)) fs.mkdirSync(OUTPUT_DIR, { recursive: true });
 initDb();
 
-// Run database migrations at startup
+    // Run database migrations at startup
 try {
   log('🔄 Running database migrations...');
   const { execSync } = require('child_process');
@@ -61,6 +111,14 @@ try {
 } catch (err: any) {
   log('⚠️ Database migration failed:', err?.message);
   // Don't fail startup if migrations fail - service can still run
+}
+
+// Initialize message continuity for zero-loss recovery
+try {
+  await initializeContinuity();
+} catch (err: any) {
+  log('⚠️ Continuity initialization failed, falling back to 0:', err?.message);
+  lastProcessedTimestamp = 0;
 }
 
 // Create database indexes for API performance
@@ -282,8 +340,8 @@ function startHTTPServer() {
   // Status endpoint - comprehensive service health
   app.get('/status', (req: Request, res: Response) => {
     const uptime = Date.now() - (status.lastReadyAt || Date.now());
-    const dbSize = fs.existsSync(path.join(OUTPUT_DIR, 'messages.db'))
-      ? fs.statSync(path.join(OUTPUT_DIR, 'messages.db')).size
+    const dbSize = fs.existsSync(path.join(process.cwd(), 'data/app.sqlite'))
+      ? fs.statSync(path.join(process.cwd(), 'data/app.sqlite')).size
       : 0;
 
     res.json({
@@ -293,6 +351,7 @@ function startHTTPServer() {
       lastReadyAt: status.lastReadyAt,
       lastMessageAt: status.lastMessageAt,
       lastDbWriteAt: status.lastDbWriteAt,
+      lastProcessedTimestamp, // ← Continuity watermark for zero-loss reconnection
       retryCount: status.retryCount,
       restartCount: status.restartCount,
       details: status.details,
@@ -777,6 +836,9 @@ async function saveMessage(m: Message, chat: Chat) {
 
     status.lastMessageAt = Date.now();
     status.lastDbWriteAt = Date.now();
+
+    // Update message continuity watermark for zero-loss reconnection
+    lastProcessedTimestamp = Math.max(lastProcessedTimestamp, m.timestamp);
 
   } catch (err: any) {
     console.error('❌ Database operation failed:', {

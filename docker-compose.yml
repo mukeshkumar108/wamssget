@@ -16,6 +16,7 @@ services:
     volumes:
       - auth_data:/app/.wwebjs_auth
       - ./data/sqlite:/app/data
+      - ./out:/app/out
 
     # Run migrations then start app
     command: >
