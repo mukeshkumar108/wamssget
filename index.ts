@@ -91,6 +91,9 @@ const MAX_RETRIES_BEFORE_AUTH_RESET = +(process.env.MAX_RETRIES_BEFORE_AUTH_RESE
 const BASE_RETRY_MS  = +(process.env.BASE_RETRY_MS || 5_000);
 const MAX_RETRY_MS   = +(process.env.MAX_RETRY_MS || 60_000);
 
+// Continuity monitoring
+const CONTINUITY_WARN_MINUTES = +(process.env.CONTINUITY_WARN_MINUTES || 10);
+
 const LOG_PATH = path.join(OUTPUT_DIR, 'service.log');
 const LOG_MAX_BYTES = +(process.env.LOG_MAX_BYTES || 10_000_000); // 10 MB
 const LOG_KEEP = +(process.env.LOG_KEEP || 3); // keep service.log.1 .. .3
@@ -101,25 +104,6 @@ const BACKFILL_BATCH = +(process.env.BACKFILL_BATCH || 100);
 =========================== */
 if (!fs.existsSync(OUTPUT_DIR)) fs.mkdirSync(OUTPUT_DIR, { recursive: true });
 initDb();
-
-    // Run database migrations at startup
-try {
-  log('🔄 Running database migrations...');
-  const { execSync } = require('child_process');
-  execSync('npx drizzle-kit migrate', { stdio: 'inherit' });
-  log('✅ Database migrations completed');
-} catch (err: any) {
-  log('⚠️ Database migration failed:', err?.message);
-  // Don't fail startup if migrations fail - service can still run
-}
-
-// Initialize message continuity for zero-loss recovery
-try {
-  await initializeContinuity();
-} catch (err: any) {
-  log('⚠️ Continuity initialization failed, falling back to 0:', err?.message);
-  lastProcessedTimestamp = 0;
-}
 
 // Create database indexes for API performance
 async function createIndexes() {
@@ -1307,6 +1291,14 @@ setInterval(async () => {
     log(`⏳ Heartbeat: last message ${(sinceMsg / 1000).toFixed(0)}s ago`);
   }
 
+  // Continuity monitoring - warn if processing has stalled
+  if (status.state === 'connected' && lastProcessedTimestamp > 0) {
+    const staleness = (now - lastProcessedTimestamp * 1000) / (60 * 1000); // Minutes
+    if (staleness > CONTINUITY_WARN_MINUTES) {
+      log(`⚠️ WARNING: Message continuity stale for ${staleness.toFixed(1)} min (last processed: ${new Date(lastProcessedTimestamp * 1000).toISOString()}) - potential processing issues`);
+    }
+  }
+
   writeStatus({});
 }, HEARTBEAT_MS);
 
@@ -1315,6 +1307,15 @@ setInterval(async () => {
 =========================== */
 async function start() {
   writeStatus({ state: 'starting', details: 'Initializing client…' });
+
+  // Initialize message continuity for zero-loss recovery
+  try {
+    await initializeContinuity();
+  } catch (err: any) {
+    log('⚠️ Continuity initialization failed, falling back to 0:', err?.message);
+    lastProcessedTimestamp = 0;
+  }
+
   setupEventHandlers(client);
   setupCallHandlers(client); // Add call event handlers
 
