@@ -6,7 +6,7 @@ services:
         - linux/amd64
     container_name: whatsapp-get
     restart: unless-stopped
-    shm_size: '1gb'
+    shm_size: '2gb' # Increased shared memory for Chromium stability
 
     # Load environment variables from .env file
     env_file:
@@ -14,9 +14,9 @@ services:
 
     # Persistent volumes for auth and data
     volumes:
-      - auth_data:/app/.wwebjs_auth
+      - ./data/wwebjs_auth:/app/.wwebjs_auth # Persist auth session
       - ./data/sqlite:/app/data
-      - ./out:/app/out
+      - ./data/out:/app/out # Persist logs and raw output
 
     # Run migrations then start app
     command: >

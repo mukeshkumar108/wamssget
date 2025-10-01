@@ -280,8 +280,6 @@ let backgroundOpsInProgress = false;  // Suspend heartbeat during intensive ops
 // Backward compatibility alias
 let bootstrapComplete = false; // For APIs that still expect this flag
 
-const ENABLE_HEARTBEAT_SUSPENSION = process.env.ENABLE_HEARTBEAT_SUSPENSION === 'true';
-
 /* ===========================
    Background Operation Protection
 =========================== */
@@ -1312,8 +1310,13 @@ async function schedulePrefill() {
   log('📤 Executing prefill (last 1 msg per 10 chats)');
   const chats = await getChatsByRecency(10);
   for (const chat of chats) {
-    const [msg] = await chat.fetchMessages({ limit: 1 });
-    if (msg) await saveMessage(msg, chat);
+    try {
+      const [msg] = await chat.fetchMessages({ limit: 1 });
+      if (msg) await saveMessage(msg, chat);
+    } catch (err: any) {
+      log(`⚠️ fetchMessages failed for chat ${chat.id._serialized}: ${err.message}`);
+      // Continue to next chat
+    }
   }
   log('📤 Prefill execution complete');
 }
@@ -1331,8 +1334,13 @@ async function scheduleBackfill() {
     log('📥 Starting backfill (last 10 msgs per chat)');
     const chats = await getChatsByRecency(10);
     for (const chat of chats) {
-      const messages = await chat.fetchMessages({ limit: 10 });
-      for (const m of messages) await saveMessage(m, chat);
+      try {
+        const messages = await chat.fetchMessages({ limit: 10 });
+        for (const m of messages) await saveMessage(m, chat);
+      } catch (err: any) {
+        log(`⚠️ fetchMessages failed for chat ${chat.id._serialized} during backfill: ${err.message}`);
+        // Continue to next chat
+      }
     }
     backfillComplete = true;
     log('✅ Backfill complete - full hydration done');

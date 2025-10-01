@@ -27,11 +27,27 @@ RUN npm prune --production
 
 FROM --platform=linux/amd64 node:20-slim AS runtime
 
-# Install runtime dependencies
+# Install runtime dependencies, including ALL Chromium dependencies for stability
 RUN apt-get update && apt-get install -y \
-    chromium \
     ca-certificates \
     dumb-init \
+    # Full list of puppeteer dependencies from docs
+    libnss3 \
+    libatk1.0-0 \
+    libatk-bridge2.0-0 \
+    libx11-xcb1 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxrandr2 \
+    libgbm1 \
+    libasound2 \
+    libcups2 \
+    libxext6 \
+    libxfixes3 \
+    libxrandr2 \
+    libxrender1 \
+    libpangocairo-1.0-0 \
+    libgtk-3-0 \
     fonts-liberation \
     --no-install-recommends && \
     rm -rf /var/lib/apt/lists/*
@@ -70,8 +86,6 @@ USER whatsapp
 
 # Set environment variables
 ENV NODE_ENV=production
-ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
-ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 
 # Expose HTTP port
 EXPOSE 3000
