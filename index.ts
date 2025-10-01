@@ -263,6 +263,12 @@ let liveListening = false;     // Connection + indexes ready → can capture liv
 let prefillComplete = false;   // Quick shallow prefill done (1 msg per chat)
 let backfillComplete = false;  // Deep archival backfill done (10 msgs per chat)
 
+// Prefill retry tracking (enhancement - can fail without breaking core)
+let prefillInProgress = false;  // Prevent concurrent prefill attempts
+let prefillAttempts = 0;       // Total attempts counter
+let prefillLastAttempt = 0;    // Timestamp of last attempt
+let prefillNextAttempt = 0;    // When next attempt is scheduled
+
 // Backward compatibility alias
 let bootstrapComplete = false; // For APIs that still expect this flag
 
@@ -386,6 +392,10 @@ function startHTTPServer() {
       liveListening,
       prefillComplete,
       backfillComplete,
+      // Prefill retry observability
+      prefillAttempts,
+      prefillLastAttempt,
+      prefillNextAttempt: prefillNextAttempt > Date.now() ? prefillNextAttempt : null,
       timestamp: Date.now()
     });
   });
@@ -1154,30 +1164,89 @@ async function dailyActiveChatBackfill() {
    Phased bootstrap: Live Listening → Prefill → Backfill
 =========================== */
 
-// Quick shallow prefill (1 message per recent chat)
-async function schedulePrefill() {
+// Smart prefill retry wrapper with exponential backoff
+async function schedulePrefillWithRetry() {
+  if (prefillInProgress) {
+    // Prevent concurrent prefill attempts
+    log('ℹ️ Prefill already in progress, skipping');
+    return;
+  }
+
+  prefillInProgress = true;
+  prefillAttempts++;
+
   try {
-    // Verify client/browser is still alive before attempting operations
-    if (!client?.getChats) {
-      log('⚠️ Browser session lost during prefill, skipping for now and retrying later');
-      setTimeout(schedulePrefill, 5000);
+    // Check client readiness before WhatsApp operations
+    if (!client?.info?.wid?.user || client.info.state !== 'CONNECTED') {
+      log('⚠️ Client not ready for prefill, skipping this attempt');
+      scheduleNextPrefill(5000); // Retry in 5s
       return;
     }
 
-    log('📥 Starting prefill (last 1 msg per chat)');
-    const chats = await getChatsByRecency(10);
-    for (const chat of chats) {
-      const [msg] = await chat.fetchMessages({ limit: 1 });
-      if (msg) await saveMessage(msg, chat);
-    }
+    log(`📥 Starting prefill attempt #${prefillAttempts}`);
+    prefillLastAttempt = Date.now();
+
+    // Do the actual prefill work
+    await schedulePrefill();
+
+    // Success! Reset tracking and mark complete
+    prefillAttempts = 0;
+    prefillInProgress = false;
     prefillComplete = true;
     log('✅ Prefill complete - minimal context available');
-    scheduleBackfill(); // Chain to deeper backfill
+
+    // Chain to deeper backfill
+    scheduleBackfill();
+
   } catch (err: any) {
+    prefillInProgress = false;
+
     const errMsg = err instanceof Error ? err.message : String(err);
-    log(`⚠️ Prefill failed (${errMsg}), retry in 5s`);
-    setTimeout(schedulePrefill, 5000);
+
+    // Calculate next retry delay (exponential backoff)
+    const baseDelay = 5000; // Start with 5s
+    const maxDelay = 60000; // Cap at 60s
+    const exponent = Math.floor(prefillAttempts / 5); // Progress slower
+    const nextDelay = Math.min(baseDelay * Math.pow(2, exponent), maxDelay);
+
+    // Only log every 5th attempt to reduce noise
+    const shouldLog = prefillAttempts % 5 === 0 || prefillAttempts <= 3;
+    if (shouldLog) {
+      log(`⚠️ Prefill attempt #${prefillAttempts} failed (${errMsg}), retrying in ${nextDelay/1000}s`);
+      scheduleNextPrefill(nextDelay);
+    } else {
+      // Schedule silently
+      scheduleNextPrefill(nextDelay);
+    }
+
+    // Age reset: avoid runaway counters (after long failures)
+    if (prefillAttempts > 100) {
+      log('ℹ️ Prefill attempts reset after 100 failures');
+      prefillAttempts = 0;
+    }
   }
+}
+
+// Helper to schedule next prefill attempt without blocking
+function scheduleNextPrefill(delayMs: number) {
+  prefillNextAttempt = Date.now() + delayMs;
+  setTimeout(() => schedulePrefillWithRetry(), delayMs);
+}
+
+// Quick shallow prefill (1 message per recent chat) - internal implementation
+async function schedulePrefill() {
+  // Verify client/browser is still alive before attempting operations
+  if (!client?.getChats) {
+    throw new Error('Browser session lost during prefill');
+  }
+
+  log('📤 Executing prefill (last 1 msg per 10 chats)');
+  const chats = await getChatsByRecency(10);
+  for (const chat of chats) {
+    const [msg] = await chat.fetchMessages({ limit: 1 });
+    if (msg) await saveMessage(msg, chat);
+  }
+  log('📤 Prefill execution complete');
 }
 
 // Deep archival backfill (10 messages per recent chat)
@@ -1274,7 +1343,7 @@ function setupEventHandlers(c: any) {
       log('🎧 Live listening started - capturing new messages immediately');
 
       // Start phased bootstrap in background
-      schedulePrefill();
+      schedulePrefillWithRetry();
 
     } catch (err: any) {
       // Only escalate on REAL errors (not protocol noise)
