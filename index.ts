@@ -254,6 +254,11 @@ let everAuthenticated = false;  // Key indicator of LocalAuth session validity
 // Track last successfully authentified time for heartbeat grace period
 let lastAuthTime = 0;
 
+// Heartbeat robustness improvements
+let consecutiveNullStates = 0;      // Count consecutive null state responses
+let lastSuccessfulState = 'unknown'; // Track last successful state for context
+const NULL_STATE_THRESHOLD = 3;     // Only trigger reconnect after 3 consecutive nulls
+
 // Three separate lifecycle readiness flags
 let connectionReady = false;   // WhatsApp connected, safe to monitor connection
 let indexesReady = false;      // DB indexes created, safe to persist messages
@@ -396,6 +401,11 @@ function startHTTPServer() {
       prefillAttempts,
       prefillLastAttempt,
       prefillNextAttempt: prefillNextAttempt > Date.now() ? prefillNextAttempt : null,
+      prefillInProgress,
+      // Heartbeat monitoring
+      consecutiveNullStates,
+      lastSuccessfulState,
+      nullStateThreshold: NULL_STATE_THRESHOLD,
       timestamp: Date.now()
     });
   });
@@ -1167,8 +1177,8 @@ async function dailyActiveChatBackfill() {
 // Smart prefill retry wrapper with exponential backoff
 async function schedulePrefillWithRetry() {
   if (prefillInProgress) {
-    // Prevent concurrent prefill attempts
-    log('ℹ️ Prefill already in progress, skipping');
+    // Prevent concurrent prefill attempts - move to debug level (normal throttling)
+    console.debug('Prefill already in progress, skipping');
     return;
   }
 
@@ -1495,13 +1505,29 @@ setInterval(async () => {
   try {
     const s = await client.getState();
 
-    if (s !== 'CONNECTED') {
+    if (s === null) {
+      consecutiveNullStates++;
+
+      // Log warnings for null states with count
+      log(`⚠️ Heartbeat: state null (count=${consecutiveNullStates})`);
+
+      // Only trigger reconnect after consecutive threshold
+      if (consecutiveNullStates >= NULL_STATE_THRESHOLD && everConnected) {
+        log(`❌ Heartbeat: consecutive null states ${consecutiveNullStates} reached, triggering reconnect`);
+        consecutiveNullStates = 0; // Reset for next connection attempt
+        await scheduleReconnect();
+        return;
+      }
+      return; // Don't proceed with normal heartbeat until state recovers
+    } else if (s !== 'CONNECTED') {
+      // Non-null but not connected (e.g., 'CONNECTING', 'DISCONNECTED')
+      consecutiveNullStates = 0; // Reset null state counter
+
       // Only trigger ACTIVE reconnection if we fell from connected state
-      // During initial connection, just observe without trying to fix
       if (everConnected) {
         // ✅ Add grace period: Don't immediately panic after authentication
-        if (Date.now() - lastAuthTime < 30000) { // 30-second grace period
-          log(`⏳ Ignoring transient null state (${(Date.now() - lastAuthTime) / 1000}s after auth)`);
+        if (Date.now() - lastAuthTime < 30000) { // 30-second grace period for transient states
+          log(`⏳ Ignoring transient ${s} state (${(Date.now() - lastAuthTime) / 1000}s after auth)`);
           return;
         }
         log(`⚠️ Heartbeat: client disconnected (state = ${s}). Triggering reconnect.`);
@@ -1512,18 +1538,33 @@ setInterval(async () => {
         // Don't trigger reconnection during first-time setup
         return;
       }
+    } else {
+      // Successfully connected - reset all state tracking
+      if (consecutiveNullStates > 0) {
+        log(`✅ Heartbeat: state recovered (was null for ${consecutiveNullStates} checks)`);
+        consecutiveNullStates = 0;
+      }
+      lastSuccessfulState = s;
     }
   } catch (err) {
-    // Similar logic for state check failures - with the same grace period
+    // State check exceptions (network errors, browser issues)
+    const errMsg = err instanceof Error ? err.message : String(err);
+
+    // Still count as a "null equivalent" for consecutive tracking
+    consecutiveNullStates++;
+
     if (everConnected) {
-      // ✅ Same grace period logic applies to state check failures
-      if (Date.now() - lastAuthTime < 30000) {
-        log(`⏳ Ignoring transient state check failure (${(Date.now() - lastAuthTime) / 1000}s after auth)`);
+      // For established connections, these are more serious than transient nulls
+      // Use a lower threshold for exceptions (indicates actual browser/connection issues)
+      if (consecutiveNullStates >= 2) { // Lower threshold for exceptions
+        log(`❌ Heartbeat: ${consecutiveNullStates} consecutive state check failures, triggering reconnect (${errMsg})`);
+        consecutiveNullStates = 0;
+        await scheduleReconnect();
         return;
+      } else {
+        log(`⚠️ Heartbeat: state check exception (count=${consecutiveNullStates}) - ${errMsg}`);
+        return; // Tolerate first exception as transient
       }
-      log('❌ Heartbeat: Cannot determine client state. Triggering reconnect.');
-      await scheduleReconnect();
-      return;
     } else {
       log('⏳ Heartbeat: Cannot check state during initial connection attempt.');
       return;
