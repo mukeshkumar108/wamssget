@@ -105,30 +105,47 @@ const BACKFILL_BATCH = +(process.env.BACKFILL_BATCH || 100);
 if (!fs.existsSync(OUTPUT_DIR)) fs.mkdirSync(OUTPUT_DIR, { recursive: true });
 initDb();
 
-// Create database indexes for API performance
+// Create database indexes for API performance (with retries)
 async function createIndexes() {
-  try {
-    log('🔍 Creating database indexes for API performance...');
+  let attempt = 0;
+  const maxAttempts = 10; // Retry up to 10 times before giving up
 
-    // Message indexes
-    await (db as any).run(sql.raw(schema.messageIndexes.chatIdTs));
-    await (db as any).run(sql.raw(schema.messageIndexes.senderIdTs));
-    await (db as any).run(sql.raw(schema.messageIndexes.ts));
-    await (db as any).run(sql.raw(schema.messageIndexes.type));
+  while (attempt < maxAttempts) {
+    attempt++;
+    try {
+      log(`🔍 Creating database indexes for API performance (attempt ${attempt}/${maxAttempts})...`);
 
-    // Call indexes
-    await (db as any).run(sql.raw(schema.callIndexes.timestamp));
-    await (db as any).run(sql.raw(schema.callIndexes.chatId));
-    await (db as any).run(sql.raw(schema.callIndexes.callerId));
+      // Message indexes
+      await (db as any).run(sql.raw(schema.messageIndexes.chatIdTs));
+      await (db as any).run(sql.raw(schema.messageIndexes.senderIdTs));
+      await (db as any).run(sql.raw(schema.messageIndexes.ts));
+      await (db as any).run(sql.raw(schema.messageIndexes.type));
 
-    // Chat indexes
-    await (db as any).run(sql.raw(schema.chatIndexes.isGroup));
-    await (db as any).run(sql.raw(schema.chatIndexes.archived));
+      // Call indexes
+      await (db as any).run(sql.raw(schema.callIndexes.timestamp));
+      await (db as any).run(sql.raw(schema.callIndexes.chatId));
+      await (db as any).run(sql.raw(schema.callIndexes.callerId));
 
-    log('✅ Database indexes created successfully');
-  } catch (err: any) {
-    log('⚠️ Database index creation failed:', err?.message);
-    // Don't fail startup if index creation fails
+      // Chat indexes
+      await (db as any).run(sql.raw(schema.chatIndexes.isGroup));
+      await (db as any).run(sql.raw(schema.chatIndexes.archived));
+
+      log('✅ Database indexes created successfully');
+      return; // Success - exit the retry loop
+
+    } catch (err: any) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      if (attempt >= maxAttempts) {
+        log(`❌ Database index creation failed permanently after ${maxAttempts} attempts: ${errMsg}`);
+        log('💥 This container will not recover - DB operations will be unstable');
+        // Don't throw - we don't want to crash the container
+        break;
+      } else {
+        const delayMs = attempt * 3000; // Progressive delay: 3s, 6s, 9s...
+        log(`⚠️ Database index creation failed (attempt ${attempt}): ${errMsg}, retrying in ${delayMs}ms...`);
+        await delay(delayMs);
+      }
+    }
   }
 }
 
@@ -228,7 +245,7 @@ function createClient() {
 
 let client: any = createClient();
 
-// Track successful initial connection (for heartbeat logic)
+ // Track successful initial connection (for heartbeat logic)
 let everConnected = false;  // Only activate aggressive heartbeat after first success
 
 // Track successful authentication (for QR lifecycle control)
@@ -237,11 +254,17 @@ let everAuthenticated = false;  // Key indicator of LocalAuth session validity
 // Track last successfully authentified time for heartbeat grace period
 let lastAuthTime = 0;
 
-// Prevent message processing before indexes are ready
-let indexesReady = false;
+// Three separate lifecycle readiness flags
+let connectionReady = false;   // WhatsApp connected, safe to monitor connection
+let indexesReady = false;      // DB indexes created, safe to persist messages
 
-// Bootstrap completion flag - heartbeat only activates after first successful bootstrap
-let bootstrapComplete = false;
+// Phased bootstrap flags
+let liveListening = false;     // Connection + indexes ready → can capture live msgs
+let prefillComplete = false;   // Quick shallow prefill done (1 msg per chat)
+let backfillComplete = false;  // Deep archival backfill done (10 msgs per chat)
+
+// Backward compatibility alias
+let bootstrapComplete = false; // For APIs that still expect this flag
 
 /* ===========================
    Contact cache
@@ -357,6 +380,12 @@ function startHTTPServer() {
       databaseSize: dbSize,
       callsCaptured: activeCalls.size,
       version: '1.0.0',
+      // Phased lifecycle readiness flags
+      connectionReady,
+      indexesReady,
+      liveListening,
+      prefillComplete,
+      backfillComplete,
       timestamp: Date.now()
     });
   });
@@ -1033,26 +1062,7 @@ async function getChatsByRecency(limit: number): Promise<Chat[]> {
   return filtered;
 }
 
-/* ===========================
-   Bootstrap
-=========================== */
-async function bootstrap() {
-  const chats = await getChatsByRecency(10); // Only 10 most recent chats
 
-  log(`📂 Found ${chats.length} chats for bootstrap`);
-  for (const chat of chats) {
-    log(`➡️ Bootstrap chat: ${resolvedChatName(chat)}`);
-    const messages = await chat.fetchMessages({ limit: 10 }); // Only last 10 messages
-    for (const m of messages) {
-      await saveMessage(m, chat); // Save each immediately
-    }
-  }
-
-  // ✅ CRITICAL: Mark bootstrap as complete to activate heartbeat
-  bootstrapComplete = true;
-  log('💾 Bootstrap complete - switched to live listening');
-  log('❤️ Monitor heartbeat started - service fully operational');
-}
 
 /* ===========================
    Progressive Enrichment (replaces old backfill)
@@ -1141,32 +1151,61 @@ async function dailyActiveChatBackfill() {
 }
 
 /* ===========================
-   Backfill scheduler
+   Phased bootstrap: Live Listening → Prefill → Backfill
 =========================== */
-function scheduleBackfill() {
-  if (!ENABLE_BACKFILL) {
-    log('ℹ️ Backfill scheduling skipped (ENABLE_BACKFILL=false)');
-    return;
+
+// Quick shallow prefill (1 message per recent chat)
+async function schedulePrefill() {
+  try {
+    // Verify client/browser is still alive before attempting operations
+    if (!client?.getChats) {
+      log('⚠️ Browser session lost during prefill, skipping for now and retrying later');
+      setTimeout(schedulePrefill, 5000);
+      return;
+    }
+
+    log('📥 Starting prefill (last 1 msg per chat)');
+    const chats = await getChatsByRecency(10);
+    for (const chat of chats) {
+      const [msg] = await chat.fetchMessages({ limit: 1 });
+      if (msg) await saveMessage(msg, chat);
+    }
+    prefillComplete = true;
+    log('✅ Prefill complete - minimal context available');
+    scheduleBackfill(); // Chain to deeper backfill
+  } catch (err: any) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    log(`⚠️ Prefill failed (${errMsg}), retry in 5s`);
+    setTimeout(schedulePrefill, 5000);
   }
-
-  // Initial progressive enrichment: 2 minutes after login
-  setTimeout(() => {
-    log("🕒 Running initial progressive enrichment (2m after login)...");
-    progressiveEnrichment();
-  }, 2 * 60 * 1000);
-
-  // Daily active chat backfill: every 24h ±1h jitter
-  const DAY_MS = 24 * 60 * 60 * 1000;
-  setInterval(() => {
-    const jitter = (Math.random() - 0.5) * 2 * 60 * 60 * 1000; // ±1h
-    const delay = Math.max(0, DAY_MS + jitter);
-
-    log(`🕒 Scheduling daily active chat backfill with jitter (${(delay/60000).toFixed(0)}m)...`);
-    setTimeout(() => {
-      dailyActiveChatBackfill();
-    }, delay);
-  }, DAY_MS);
 }
+
+// Deep archival backfill (10 messages per recent chat)
+async function scheduleBackfill() {
+  try {
+    // Verify client/browser is still alive before attempting operations
+    if (!client?.getChats) {
+      log('⚠️ Browser session lost during backfill, skipping for now and retrying later');
+      setTimeout(scheduleBackfill, 10000);
+      return;
+    }
+
+    log('📥 Starting backfill (last 10 msgs per chat)');
+    const chats = await getChatsByRecency(10);
+    for (const chat of chats) {
+      const messages = await chat.fetchMessages({ limit: 10 });
+      for (const m of messages) await saveMessage(m, chat);
+    }
+    backfillComplete = true;
+    log('✅ Backfill complete - full hydration done');
+  } catch (err: any) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    log(`⚠️ Backfill failed (${errMsg}), retry later`);
+    setTimeout(scheduleBackfill, 10000);
+  }
+}
+
+
 
 
 /* ===========================
@@ -1215,52 +1254,31 @@ function setupEventHandlers(c: any) {
     log('✅ WhatsApp client is ready!');
     everConnected = true; // Mark that we successfully connected
 
-    // Allow browser session to stabilize before heavy operations
-    await delay(2000);
+    // Connection established - heartbeat can start monitoring
+    connectionReady = true;
+    log('🔗 Connection ready - heartbeat enabled');
+
+    log('⏳ Ready → cooldown started (5s)');
+
+    // Minimum cooldown to prevent collisions with Puppeteer session setup
+    await delay(5000);
 
     try {
       // Create database indexes for API performance (this must succeed before messages)
       await createIndexes();
-      indexesReady = true; // 🔑 Critical: Allow message processing now
+      indexesReady = true; // Safe to persist messages
       log('🔓 Database indexes ready - message processing enabled');
 
-      // Only bootstrap if connection is verified stable
-      let isStable = false;
-      try {
-        isStable = await isConnectionStable();
-      } catch (checkErr: any) {
-        console.error('❌ Connection stability check failed:', {
-          message: checkErr?.message,
-          stack: checkErr?.stack,
-          timestamp: new Date().toISOString()
-        });
-        isStable = false; // Force postponed bootstrap on error
-      }
+      // Enable live listening immediately
+      liveListening = true;
+      log('🎧 Live listening started - capturing new messages immediately');
 
-      if (isStable) {
-        await bootstrap();
-        scheduleBackfill();
-      } else {
-        log('⏳ Bootstrap postponed - waiting for additional connection stability');
-        // ✅ CRITICAL: Also wrap this timeout in try-catch to prevent unhandled exceptions
-        try {
-          setTimeout(async () => {
-            await bootstrap();
-            scheduleBackfill();
-          }, 2000);
-        } catch (bootstrapErr: any) {
-          console.error('❌ Delayed bootstrap error:', {
-            message: bootstrapErr?.message,
-            stack: bootstrapErr?.stack,
-            timestamp: new Date().toISOString()
-          });
-          // ✅ CRITICAL: Trigger reconnection, NOT container exit
-          await scheduleReconnect();
-        }
-      }
+      // Start phased bootstrap in background
+      schedulePrefill();
+
     } catch (err: any) {
-      // ✅ CRITICAL: Any error in ready handler operations should trigger reconnection, NOT kill container
-      console.error('❌ Bootstrap error (will reconnect):', {
+      // Only escalate on REAL errors (not protocol noise)
+      console.error('❌ Bootstrap retry exhausted (will reconnect):', {
         message: err?.message,
         stack: err?.stack,
         name: err?.name,
@@ -1269,10 +1287,9 @@ function setupEventHandlers(c: any) {
 
       writeStatus({
         state: 'reconnecting',
-        details: `Bootstrap failed: ${err?.message || err}`,
+        details: `Bootstrap failed after retries: ${err?.message || err}`,
       });
 
-      // ✅ CRITICAL: Trigger reconnection within same container session
       await scheduleReconnect();
     }
   });
@@ -1301,6 +1318,7 @@ function setupEventHandlers(c: any) {
       return;
     }
 
+    // Process live messages immediately - live listening is enabled!
     try {
       const chat = await m.getChat();
       await saveMessage(m, chat);
@@ -1397,9 +1415,9 @@ async function scheduleReconnect() {
    Heartbeat - Only active after bootstrap completes
 =========================== */
 setInterval(async () => {
-  // Prevent heartbeat from running during bootstrap phase
-  if (!bootstrapComplete) {
-    log(`⏳ Skipping heartbeat (bootstrap in progress)`);
+  // Heartbeat monitors connection, not bootstrap state
+  if (!connectionReady) {
+    log(`⏳ Heartbeat: connection not ready`);
     return;
   }
 
