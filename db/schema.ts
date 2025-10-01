@@ -76,19 +76,19 @@ export const calls = sqliteTable('calls', {
 
 // INDEXES for API performance
 export const messageIndexes = {
-  chatIdTs: 'CREATE INDEX IF NOT EXISTS idx_messages_chatId_ts ON messages(chatId, ts DESC)',
-  senderIdTs: 'CREATE INDEX IF NOT EXISTS idx_messages_senderId_ts ON messages(senderId, ts DESC)',
+  chatIdTs: 'CREATE INDEX IF NOT EXISTS idx_messages_chat_id_ts ON messages(chat_id, ts DESC)',
+  senderIdTs: 'CREATE INDEX IF NOT EXISTS idx_messages_sender_id_ts ON messages(sender_id, ts DESC)',
   ts: 'CREATE INDEX IF NOT EXISTS idx_messages_ts ON messages(ts DESC)',
   type: 'CREATE INDEX IF NOT EXISTS idx_messages_type ON messages(type)',
 };
 
 export const callIndexes = {
   timestamp: 'CREATE INDEX IF NOT EXISTS idx_calls_timestamp ON calls(timestamp DESC)',
-  chatId: 'CREATE INDEX IF NOT EXISTS idx_calls_chatId ON calls(chatId)',
-  callerId: 'CREATE INDEX IF NOT EXISTS idx_calls_callerId ON calls(callerId)',
+  chatId: 'CREATE INDEX IF NOT EXISTS idx_calls_chat_id ON calls(chat_id)',
+  callerId: 'CREATE INDEX IF NOT EXISTS idx_calls_caller_id ON calls(caller_id)',
 };
 
 export const chatIndexes = {
-  isGroup: 'CREATE INDEX IF NOT EXISTS idx_chats_isGroup ON chats(isGroup)',
+  isGroup: 'CREATE INDEX IF NOT EXISTS idx_chats_is_group ON chats(is_group)',
   archived: 'CREATE INDEX IF NOT EXISTS idx_chats_archived ON chats(archived)',
 };
