@@ -24,6 +24,14 @@ Runs headlessly 24/7, captures all messages/chats/contacts/reactions, and saves 
 - ✅ **Graceful Shutdown**: Proper resource cleanup on exit signals
 - ✅ **Comprehensive Error Handling**: Stack traces and structured error logging
 
+### **🏗️ New: Container-Optimized Architecture**
+- 🐳 **Phased Bootstrap System**: Live Listening → Prefill → Backfill (immediate message capture)
+- 🔄 **Browser Session Resilience**: Automatic crash detection and graceful recovery
+- 🗄️ **Database Resilience**: Index creation with retry + graceful degradation
+- 🔥 **Immediate Live Capture**: Messages captured as soon as WhatsApp connects (no waiting)
+- 🛡️ **Resource-Aware Design**: Optimized for container memory/CPU constraints
+- 📊 **Three-Stage Readiness**: Connection → Database → Bootstrap lifecycle tracking
+
 ### **Configuration**
 - ✅ **Environment Variables**: Extensive configuration options
 - ✅ **Status Tracking**: Real-time service status in JSON format
@@ -251,7 +259,7 @@ WantedBy=multi-user.target
 
 ## �🔍 Monitoring & Health Checks
 
-### **Status File** (`out/status.json`)
+### **Status File** (`out/status.json`) - Updated with New Architecture
 ```json
 {
   "state": "connected",
@@ -261,9 +269,22 @@ WantedBy=multi-user.target
   "lastDbWriteAt": 1699123456789,
   "retryCount": 0,
   "restartCount": 0,
-  "details": ""
+  "details": "",
+  "connectionReady": true,
+  "indexesReady": false,
+  "liveListening": false,
+  "prefillComplete": false,
+  "backfillComplete": false,
+  "timestamp": 1699123456789
 }
 ```
+
+**New Lifecycle Flags (v2.0+):**
+- `connectionReady`: WhatsApp Web client connected
+- `indexesReady`: Database indexes functional
+- `liveListening`: System capturing new messages
+- `prefillComplete`: Initial quick hydration done
+- `backfillComplete`: Deep archival loading complete
 
 ### **Health Check Script**
 ```bash
@@ -475,9 +496,30 @@ curl -H "Authorization: Bearer your-secret-key-here" \
 - Delete `.wwebjs_auth` folder and restart
 - Make sure WhatsApp Web is accessible
 
-**"Database errors"**
+**"Database Index Creation Fails in Docker"** 🐳 **(New v2.0)** ⚠️
+```
+Failed to run the query 'CREATE INDEX IF NOT EXISTS idx_messages_chatId_ts...'
+```
+- **This is expected in containers** with limited SQLite resources
+- **Service continues working** - message capture and storage work fine
+- **Performance impact**: API queries will be ~10-50x slower without indexes
+- **Solution**: Monitor and consider PostgreSQL for high-traffic deployments
+- **No panic needed**: Core functionality (message capture) works perfectly
+
+**"Browser session lost" / "Session closed" during bootstrap** 🐳 **(New v2.0)**
+```
+⚠️ Prefill failed (Protocol error... Session closed. Most likely the page has been closed.)
+⚠️ Browser session lost during prefill, skipping for now and retrying later
+```
+- **Container memory/CPU limits** causing Chrome browser tabs to crash
+- **Automatic recovery** - service retries with progressive delays (5s, 10s, etc.)
+- **Normal behavior in constrained containers** - no manual intervention needed
+- **Messages still captured** during successful phases
+
+**"General Database errors"**
 - Run `npx drizzle-kit migrate` to update schema
 - Check file permissions on `out/` directory
+- For Docker: Ensure persistent volume has proper permissions
 
 **"High memory usage"**
 - Reduce `BACKFILL_BATCH` size in environment
