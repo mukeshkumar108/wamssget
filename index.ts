@@ -280,6 +280,8 @@ let backgroundOpsInProgress = false;  // Suspend heartbeat during intensive ops
 // Backward compatibility alias
 let bootstrapComplete = false; // For APIs that still expect this flag
 
+const ENABLE_HEARTBEAT_SUSPENSION = process.env.ENABLE_HEARTBEAT_SUSPENSION === 'true';
+
 /* ===========================
    Background Operation Protection
 =========================== */
