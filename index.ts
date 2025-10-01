@@ -274,8 +274,32 @@ let prefillAttempts = 0;       // Total attempts counter
 let prefillLastAttempt = 0;    // Timestamp of last attempt
 let prefillNextAttempt = 0;    // When next attempt is scheduled
 
+// Background operation protection (for heartbeat)
+let backgroundOpsInProgress = false;  // Suspend heartbeat during intensive ops
+
 // Backward compatibility alias
 let bootstrapComplete = false; // For APIs that still expect this flag
+
+/* ===========================
+   Background Operation Protection
+=========================== */
+
+// Helper function to execute WhatsApp-intensive operations while suspending heartbeat
+async function executeWithBackgroundProtection<T>(
+  operationName: string,
+  operation: () => Promise<T>
+): Promise<T> {
+  backgroundOpsInProgress = true;
+  log(`🔒 ${operationName}: suspending heartbeat during execution`);
+
+  try {
+    const result = await operation();
+    log(`🔓 ${operationName}: complete, heartbeat resumed`);
+    return result;
+  } finally {
+    backgroundOpsInProgress = false;
+  }
+}
 
 /* ===========================
    Contact cache
@@ -402,10 +426,12 @@ function startHTTPServer() {
       prefillLastAttempt,
       prefillNextAttempt: prefillNextAttempt > Date.now() ? prefillNextAttempt : null,
       prefillInProgress,
+      prefillBlockReason: getBlockReason(),  // Why can't prefill run?
       // Heartbeat monitoring
       consecutiveNullStates,
       lastSuccessfulState,
       nullStateThreshold: NULL_STATE_THRESHOLD,
+      backgroundOpsInProgress,  // Is heartbeat suspended?
       timestamp: Date.now()
     });
   });
@@ -1174,6 +1200,34 @@ async function dailyActiveChatBackfill() {
    Phased bootstrap: Live Listening → Prefill → Backfill
 =========================== */
 
+// Check if WhatsApp connection is ready for background operations (simpler check)
+function isClientReadyForBackgroundOps(): boolean {
+  try {
+    // More reliable check: Our flags + client method exists
+    return (
+      connectionReady &&            // Our 'ready' event flag
+      indexesReady &&               // DB ready
+      client?.getChats &&           // Method exists
+      everConnected                 // Connected at least once
+    );
+  } catch {
+    return false;
+  }
+}
+
+// Get detailed explanation of why background operations can't run
+function getBlockReason(): string {
+  const checks = [
+    { name: 'connectionReady', value: connectionReady },
+    { name: 'indexesReady', value: indexesReady },
+    { name: 'client.getChats', value: !!client?.getChats },
+    { name: 'everConnected', value: everConnected },
+  ];
+
+  const failed = checks.filter(check => !check.value);
+  return failed.length > 0 ? failed[0].name : 'none';
+}
+
 // Smart prefill retry wrapper with exponential backoff
 async function schedulePrefillWithRetry() {
   if (prefillInProgress) {
@@ -1187,8 +1241,9 @@ async function schedulePrefillWithRetry() {
 
   try {
     // Check client readiness before WhatsApp operations
-    if (!client?.info?.wid?.user || client.info.state !== 'CONNECTED') {
+    if (!isClientReadyForBackgroundOps()) {
       log('⚠️ Client not ready for prefill, skipping this attempt');
+      prefillInProgress = false;  // ✅ CRITICAL FIX: Always reset flag
       scheduleNextPrefill(5000); // Retry in 5s
       return;
     }
@@ -1196,8 +1251,10 @@ async function schedulePrefillWithRetry() {
     log(`📥 Starting prefill attempt #${prefillAttempts}`);
     prefillLastAttempt = Date.now();
 
-    // Do the actual prefill work
-    await schedulePrefill();
+    // Do the actual prefill work with heartbeat protection
+    await executeWithBackgroundProtection('Prefill', async () => {
+      await schedulePrefill();
+    });
 
     // Success! Reset tracking and mark complete
     prefillAttempts = 0;
@@ -1209,7 +1266,7 @@ async function schedulePrefillWithRetry() {
     scheduleBackfill();
 
   } catch (err: any) {
-    prefillInProgress = false;
+    prefillInProgress = false;  // ✅ Always reset on error
 
     const errMsg = err instanceof Error ? err.message : String(err);
 
@@ -1497,6 +1554,12 @@ setInterval(async () => {
   // Heartbeat monitors connection, not bootstrap state
   if (!connectionReady) {
     log(`⏳ Heartbeat: connection not ready`);
+    return;
+  }
+
+  // ✅ PHASE 2: Suspend heartbeat during background operations to prevent conflicts
+  if (backgroundOpsInProgress) {
+    console.debug('Heartbeat: skipping (background ops in progress)');
     return;
   }
 
