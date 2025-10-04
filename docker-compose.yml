@@ -2,8 +2,6 @@ services:
   whatsapp-get:
     build:
       context: .
-      platforms:
-        - linux/amd64
     container_name: whatsapp-get
     restart: unless-stopped
     shm_size: '2gb' # Increased shared memory for Chromium stability
@@ -26,6 +24,8 @@ services:
     environment:
       - NODE_OPTIONS=--max-old-space-size=1024
       - NODE_ENV=production
+      - PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
+      - PUPPETEER_SKIP_DOWNLOAD=true
       - HTTP_PORT=3000
       - BOOTSTRAP_CHAT_LIMIT=15
       - BOOTSTRAP_MSG_LIMIT=20

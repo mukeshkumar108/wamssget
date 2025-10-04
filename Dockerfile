@@ -1,5 +1,8 @@
 # Multi-stage production build for TypeScript compilation
-FROM --platform=linux/amd64 node:20-slim AS build
+FROM node:20-slim AS build
+
+# Make sure Puppeteer doesn’t try to download Chromium
+ENV PUPPETEER_SKIP_DOWNLOAD=true
 
 # Install build dependencies for better-sqlite3 native compilation
 RUN apt-get update && apt-get install -y \
@@ -25,13 +28,16 @@ RUN npm run build
 # Remove dev dependencies to minimize image size but keep runtime dependencies
 RUN npm prune --production
 
-FROM --platform=linux/amd64 node:20-slim AS runtime
+FROM node:20-slim AS runtime
 
 # Install runtime dependencies, including ALL Chromium dependencies for stability
 RUN apt-get update && apt-get install -y \
     ca-certificates \
     dumb-init \
     # Full list of puppeteer dependencies from docs
+    chromium \
+    chromium-common \
+    chromium-sandbox \
     libnss3 \
     libatk1.0-0 \
     libatk-bridge2.0-0 \
@@ -49,6 +55,7 @@ RUN apt-get update && apt-get install -y \
     libpangocairo-1.0-0 \
     libgtk-3-0 \
     fonts-liberation \
+    fonts-noto-color-emoji \
     --no-install-recommends && \
     rm -rf /var/lib/apt/lists/*
 
@@ -63,7 +70,7 @@ WORKDIR /app
 COPY --from=build /app/node_modules ./node_modules
 
 # Copy compiled JavaScript from build stage
-COPY --from=build /app/dist ./dist
+COPY --from=build /app/dist ./dist 
 
 # Copy package.json for metadata
 COPY package*.json ./
@@ -86,6 +93,8 @@ USER whatsapp
 
 # Set environment variables
 ENV NODE_ENV=production
+ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
+ENV PUPPETEER_SKIP_DOWNLOAD=true
 
 # Expose HTTP port
 EXPOSE 3000
