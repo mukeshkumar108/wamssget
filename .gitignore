@@ -31,6 +31,15 @@ out/calls.jsonl
 out/service.log
 out/status.json
 
+# Persistent container data directories - mounted volumes containing sensitive data
+# (these persist across container restarts but must never be committed)
+data/
+data/*
+data/*/session/
+
+# Keep empty directory structure indicator
+!data/.gitkeep
+
 # OS generated files
 .DS_Store
 .DS_Store?
